@@ -430,7 +430,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             let variance_matrix = variance_based_weight_matrix(&seed_arrays);
 
             match (variance_matrix, learned_matrix.get_ref().as_ref()) {
-                (Some(vm), Some(lm)) => {
+                (Ok(vm), Some(lm)) => {
                     // Both available: blend them.
                     // Special-case the extremes to avoid IEEE 754 inf*0.0=NaN when the
                     // variance matrix has infinite entries (zero-variance features).
@@ -446,11 +446,18 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                                  learnedblend as f32 / 100.0, seed_raw_metrics.len());
                     (Some(blended), format!("blended(learned={}%)", learnedblend))
                 }
-                (Some(vm), None) => {
+                (Ok(vm), None) => {
                     log::debug!("Using variance-based dynamic weight matrix from {} seeds", seed_raw_metrics.len());
                     (Some(vm), "variance-based".to_string())
                 }
-                _ => (None, "none".to_string())
+                (Err(err), Some(lm)) => {
+                    log::warn!("Failed to build variance-based matrix: {}. Falling back to learned matrix.", err);
+                    (Some(lm.clone()), "learned-matrix".to_string())
+                }
+                (Err(err), None) => {
+                    log::warn!("Failed to build variance-based matrix: {}. Falling back to standard algorithm.", err);
+                    (None, "none".to_string())
+                }
             }
         } else if learned_matrix.is_some() {
             // Single seed: use the learned Mahalanobis matrix

@@ -453,7 +453,7 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 [[package]]
 name = "bliss-audio"
 version = "0.11.2"
-source = "git+https://github.com/chrober/bliss-rs.git?branch=feature%2Fanalysis-gate-and-variance-weights#ee5d269fa41968344dae693c82a50d22cf820355"
+source = "git+https://github.com/chrober/bliss-rs.git#721239732d0c3f454ea0762994addbce9eef40ee"
 dependencies = [
  "adler32",
  "extended-isolation-forest",
