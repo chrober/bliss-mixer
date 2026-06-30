@@ -474,7 +474,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
 
     if useadaptiveweights == 1 {
         // Adaptive weighting: compute weight matrix from seed variance, then
-        // use KD-tree as pre-filter and re-rank candidates with dynamic distances
+        // scan and re-rank candidates with adaptive distances.
         let learned_matrix = req.app_data::<web::Data<Option<Array2<f32>>>>().unwrap();
 
         // Collect raw (unweighted) metrics for all seeds
@@ -511,7 +511,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     (Some(blended), format!("blended(learned={}%)", learnedblend))
                 }
                 (Ok(vm), None) => {
-                    log::debug!("Using variance-based dynamic weight matrix from {} seeds", seed_raw_metrics.len());
+                    log::debug!("Using variance-based adaptive weight matrix from {} seeds", seed_raw_metrics.len());
                     (Some(vm), "variance-based".to_string())
                 }
                 (Err(err), Some(lm)) => {
@@ -523,7 +523,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     (None, "none".to_string())
                 }
             }
-        } else if learned_matrix.is_some() {
+        } else if !seed_raw_metrics.is_empty() && learned_matrix.is_some() {
             // Single seed: use the learned Mahalanobis matrix
             log::debug!("Using learned Mahalanobis matrix for single seed");
             (learned_matrix.get_ref().clone(), "learned-matrix".to_string())
@@ -532,7 +532,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
         };
 
         if let Some(ref matrix) = weight_matrix {
-            log::debug!("Using dynamic weighting algorithm");
+            log::debug!("Using adaptive weighting algorithm");
             let t_total = Instant::now();
 
             if wantdebug {
@@ -541,7 +541,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     .filter(|&(i, _)| matrix[[i, i]] > 0.01)
                     .map(|(i, idx)| format!("{:?}={:.3}", idx, matrix[[i, i]]))
                     .collect();
-                log::debug!("Dynamic weights (non-trivial): {}", weights_summary.join(", "));
+                log::debug!("Adaptive weights (non-trivial): {}", weights_summary.join(", "));
             }
 
             // Compute the mean of seed raw metrics (to use as the "ideal" point)
@@ -561,7 +561,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             let db_load_ms = t_db.elapsed().as_millis() as u64;
             log::debug!("DB load: {} tracks in {}ms", all_raw.len(), db_load_ms);
 
-            // Score all tracks using dynamic Mahalanobis distance
+            // Score all tracks using adaptive Mahalanobis distance
             let t_dist = Instant::now();
             let mean_arr = Array1::from_vec(mean_raw.to_vec());
             let mut scored: Vec<(u64, f32)> = all_raw
@@ -682,7 +682,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             }
             let filter_ms = t_filter.elapsed().as_millis() as u64;
             let total_ms = t_total.elapsed().as_millis() as u64;
-            log::debug!("Filter+select: {}ms, Total dynamic weights: {}ms", filter_ms, total_ms);
+            log::debug!("Filter+select: {}ms, Total adaptive weights: {}ms", filter_ms, total_ms);
 
             // Store debug info only if requested
             if wantdebug {
@@ -708,14 +708,14 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 });
             }
         } else {
-            // No weight matrix available (single seed, no learned matrix) — fall back to standard
+            // No adaptive matrix available; fall back to the standard algorithm.
             log::debug!("Adaptive weighting requested but no weight matrix available, falling back to standard algorithm");
             useforest = 0;
             // Fall through to standard algorithm below
         }
     }
 
-    // Only run forest/standard if dynamic weighting didn't produce results
+    // Only run forest/standard if adaptive weighting didn't produce results
     if chosen.is_empty() {
     if fseeds.len()>=MIN_FOR_FOREST {
         log::debug!("Using extended isolation forest algorithm");
@@ -976,7 +976,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     let mut http_resp = HttpResponse::Ok();
     if let Some(di) = debug_info {
         if let Ok(json) = serde_json::to_string(&di) {
-            log::debug!("Dynamic weights debug: {}", json);
+            log::debug!("Adaptive weights debug: {}", json);
             http_resp.set_header("X-Bliss-Debug", json);
         }
     }

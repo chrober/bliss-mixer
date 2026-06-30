@@ -32,7 +32,7 @@ response is a new-line separated list of tracks.
 Notes:
 * If `shuffle` is enabled then the mixer will locate more than `count` similar tracks, shuffle the list, and take the first `count` tracks of the shuffled list.
 * If `forest` is enabled the mixer will first get N similar tracks for each seed track, and use that set of tracks for the forest.
-* `adaptiveweights` takes precedence over `forest` — if both are set, adaptive weighting is used.
+* `adaptiveweights` takes precedence over `forest` - if both are set, adaptive weighting is used.
 * With `adaptiveweights`, the mixer computes a variance-based weight matrix from the seed tracks' features, then scores all tracks in the database using Mahalanobis distance. Features with low variance across seeds get higher weight (i.e. the mix preserves what the seeds have in common). When a learned matrix is also loaded (via `--matrix` CLI flag), the two matrices are blended: `M = (learnedblend/100) * M_learned + (1 - learnedblend/100) * M_variance`. Single-seed requests use the learned matrix alone. Falls back to the standard algorithm if fewer than 2 seeds are provided and no learned matrix is available.
 * When `debug=1` and `adaptiveweights=1`, the response includes an `X-Bliss-Debug` HTTP header containing a JSON object with per-feature weights, filter statistics, and timing information.
 * `norepart` and `norepalb` require `previous` list of tracks to be supplied.
