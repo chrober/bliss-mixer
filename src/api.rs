@@ -11,7 +11,7 @@ use crate::forest;
 use crate::tree;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use bliss_audio::AnalysisIndex;
-use bliss_audio::playlist::{mahalanobis_distance, variance_based_weight_matrix};
+use bliss_audio::playlist::mahalanobis_distance;
 use chrono::Datelike;
 use globset::Glob;
 use ndarray::{Array1, Array2};
@@ -485,51 +485,14 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             }
         }
 
-        // Determine the weight matrix to use
-        let (weight_matrix, algorithm_name): (Option<Array2<f32>>, String) = if seed_raw_metrics.len() >= 2 {
-            // Multi-seed: compute variance-based weight matrix
-            let seed_arrays: Vec<Array1<f32>> = seed_raw_metrics.iter()
-                .map(|m| Array1::from_vec(m.to_vec()))
-                .collect();
-            let variance_matrix = variance_based_weight_matrix(&seed_arrays);
-
-            match (variance_matrix, learned_matrix.get_ref().as_ref()) {
-                (Ok(vm), Some(lm)) => {
-                    // Both available: blend them.
-                    // Special-case the extremes to avoid IEEE 754 inf*0.0=NaN when the
-                    // variance matrix has infinite entries (zero-variance features).
-                    let blended = if learnedblend == 100 {
-                        lm.clone()
-                    } else if learnedblend == 0 {
-                        vm
-                    } else {
-                        let alpha = learnedblend as f32 / 100.0;
-                        lm * alpha + &vm * (1.0 - alpha)
-                    };
-                    log::debug!("Blending learned (alpha={:.2}) and variance matrices from {} seeds",
-                                 learnedblend as f32 / 100.0, seed_raw_metrics.len());
-                    (Some(blended), format!("blended(learned={}%)", learnedblend))
-                }
-                (Ok(vm), None) => {
-                    log::debug!("Using variance-based adaptive weight matrix from {} seeds", seed_raw_metrics.len());
-                    (Some(vm), "variance-based".to_string())
-                }
-                (Err(err), Some(lm)) => {
-                    log::warn!("Failed to build variance-based matrix: {}. Falling back to learned matrix.", err);
-                    (Some(lm.clone()), "learned-matrix".to_string())
-                }
-                (Err(err), None) => {
-                    log::warn!("Failed to build variance-based matrix: {}. Falling back to standard algorithm.", err);
-                    (None, "none".to_string())
-                }
-            }
-        } else if !seed_raw_metrics.is_empty() && learned_matrix.is_some() {
-            // Single seed: use the learned Mahalanobis matrix
-            log::debug!("Using learned Mahalanobis matrix for single seed");
-            (learned_matrix.get_ref().clone(), "learned-matrix".to_string())
-        } else {
-            (None, "none".to_string())
-        };
+        // Determine the weight matrix to use.
+        let selection = crate::adaptive::select_matrix(
+            &seed_raw_metrics,
+            learned_matrix.get_ref().as_ref(),
+            learnedblend,
+        );
+        let weight_matrix = selection.matrix;
+        let algorithm_name = selection.algorithm_name;
 
         if let Some(ref matrix) = weight_matrix {
             log::debug!("Using adaptive weighting algorithm");
@@ -545,15 +508,8 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             }
 
             // Compute the mean of seed raw metrics (to use as the "ideal" point)
-            let mut mean_raw = [0.0f32; tree::DIMENSIONS];
-            for raw in &seed_raw_metrics {
-                for i in 0..tree::DIMENSIONS {
-                    mean_raw[i] += raw[i];
-                }
-            }
-            for i in 0..tree::DIMENSIONS {
-                mean_raw[i] /= seed_raw_metrics.len() as f32;
-            }
+            let mean_raw = crate::adaptive::mean_metrics(&seed_raw_metrics)
+                .expect("an adaptive matrix requires at least one seed");
 
             // Full DB scan: compute Mahalanobis distance for every track
             let t_db = Instant::now();

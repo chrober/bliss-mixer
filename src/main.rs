@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process;
 use rayon::ThreadPoolBuilder;
+mod adaptive;
 mod api;
 mod db;
 mod forest;
