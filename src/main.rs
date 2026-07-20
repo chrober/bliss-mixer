@@ -222,3 +222,67 @@ async fn main() -> std::io::Result<()> {
         server.run().await
     }
 }
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn with_matrix_file(value: serde_json::Value, test: impl FnOnce(&str)) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "bliss-mixer-characterization-{}-{unique}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        test(path.to_str().unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn identity_values() -> Vec<f32> {
+        (0..tree::DIMENSIONS)
+            .flat_map(|row| {
+                (0..tree::DIMENSIONS).map(move |column| if row == column { 1.0 } else { 0.0 })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_matrix_path_disables_the_learned_metric() {
+        assert!(load_learned_matrix("").is_none());
+    }
+
+    #[test]
+    fn loads_blissify_wrapped_matrix_in_row_major_order() {
+        let payload = json!({
+            "m": {
+                "v": 1,
+                "dim": [tree::DIMENSIONS, tree::DIMENSIONS],
+                "data": identity_values()
+            }
+        });
+        with_matrix_file(payload, |path| {
+            let matrix = load_learned_matrix(path).expect("wrapped matrix should load");
+            assert_eq!(matrix.shape(), &[tree::DIMENSIONS, tree::DIMENSIONS]);
+            assert_eq!(matrix[(0, 0)], 1.0);
+            assert_eq!(matrix[(0, 1)], 0.0);
+            assert_eq!(matrix[(tree::DIMENSIONS - 1, tree::DIMENSIONS - 1)], 1.0);
+        });
+    }
+
+    #[test]
+    fn loads_unwrapped_matrix_and_rejects_wrong_dimensions() {
+        let valid = json!({
+            "dim": [tree::DIMENSIONS, tree::DIMENSIONS],
+            "data": identity_values()
+        });
+        with_matrix_file(valid, |path| assert!(load_learned_matrix(path).is_some()));
+
+        let invalid = json!({"dim": [2, 2], "data": [1.0, 0.0, 0.0, 1.0]});
+        with_matrix_file(invalid, |path| assert!(load_learned_matrix(path).is_none()));
+    }
+}

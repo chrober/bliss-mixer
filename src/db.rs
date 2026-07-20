@@ -363,3 +363,79 @@ impl Db {
         results
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_db() -> Db {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE TracksV2 (
+                File TEXT, Title TEXT, Artist TEXT, AlbumArtist TEXT, Album TEXT,
+                Genre TEXT, Duration INTEGER,
+                Tempo REAL, Zcr REAL, MeanSpectralCentroid REAL,
+                StdDevSpectralCentroid REAL, MeanSpectralRolloff REAL,
+                StdDevSpectralRolloff REAL, MeanSpectralFlatness REAL,
+                StdDevSpectralFlatness REAL, MeanLoudness REAL,
+                StdDevLoudness REAL, Chroma1 REAL, Chroma2 REAL, Chroma3 REAL,
+                Chroma4 REAL, Chroma5 REAL, Chroma6 REAL, Chroma7 REAL,
+                Chroma8 REAL, Chroma9 REAL, Chroma10 REAL, Chroma11 REAL,
+                Chroma12 REAL, Chroma13 REAL, Ignore INTEGER
+            );
+            INSERT INTO TracksV2 VALUES (
+                'fixture.flac', 'Fixture title', 'Fixture artist',
+                'Fixture album artist', 'Fixture album', 'Rock; Electronic', 181,
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                18, 19, 20, 21, 22, 23, 0
+            );
+            INSERT INTO TracksV2 VALUES (
+                'ignored.flac', 'Ignored', 'Ignored artist', 'Ignored artist',
+                'Ignored album', 'Ignored', 182,
+                101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 1
+            );
+            "#,
+        )
+        .unwrap();
+        Db { conn }
+    }
+
+    #[test]
+    fn raw_metrics_follow_the_canonical_twenty_three_column_order() {
+        let db = fixture_db();
+        let metrics = db.get_raw_metrics(1).unwrap();
+        for (index, value) in metrics.iter().enumerate() {
+            assert_eq!(*value, (index + 1) as f32);
+        }
+    }
+
+    #[test]
+    fn metadata_and_row_identity_match_tracksv2() {
+        let db = fixture_db();
+        assert_eq!(db.get_rowid("fixture.flac"), 1);
+        assert_eq!(db.get_rowid("missing.flac"), 0);
+        let metadata = db.get_metadata(1).unwrap();
+        assert_eq!(metadata.file, "fixture.flac");
+        assert_eq!(metadata.title.as_deref(), Some("Fixture title"));
+        assert_eq!(metadata.artist.as_deref(), Some("Fixture artist"));
+        assert_eq!(metadata.album_artist.as_deref(), Some("Fixture album artist"));
+        assert_eq!(metadata.album.as_deref(), Some("Fixture album"));
+        assert_eq!(metadata.genre.as_deref(), Some("Rock; Electronic"));
+        assert_eq!(metadata.duration, Some(181));
+        assert_eq!(metadata.tempo, Some(1.0));
+    }
+
+    #[test]
+    fn full_scans_and_genres_exclude_ignored_rows() {
+        let db = fixture_db();
+        let metrics = db.get_all_raw_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].0, 1);
+        let genres = db.get_all_genres();
+        assert_eq!(genres.len(), 2);
+        assert!(genres.contains("Rock"));
+        assert!(genres.contains("Electronic"));
+    }
+}
