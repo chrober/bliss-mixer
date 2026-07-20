@@ -26,61 +26,21 @@ fn load_learned_matrix(path: &str) -> Option<Array2<f32>> {
     if path.is_empty() {
         return None;
     }
-    let matrix_path = Path::new(path);
+    let matrix_path = std::path::Path::new(path);
     if !matrix_path.exists() {
         log::warn!("Matrix file '{}' does not exist", path);
         return None;
     }
-    match std::fs::read_to_string(matrix_path) {
-        Ok(contents) => {
-            match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(json) => {
-                    // Support blissify config.json format: {"m": {"v": 1, "dim": [N, N], "data": [...]}}
-                    let m_obj = if json.get("m").is_some() {
-                        json.get("m").unwrap()
-                    } else {
-                        &json
-                    };
-                    if let (Some(dim), Some(data)) = (m_obj.get("dim"), m_obj.get("data")) {
-                        let dims: Vec<usize> = dim.as_array()
-                            .unwrap_or(&vec![])
-                            .iter()
-                            .filter_map(|v| v.as_u64().map(|u| u as usize))
-                            .collect();
-                        let values: Vec<f32> = data.as_array()
-                            .unwrap_or(&vec![])
-                            .iter()
-                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                            .collect();
-                        if dims.len() == 2 && dims[0] == tree::DIMENSIONS && dims[1] == tree::DIMENSIONS
-                            && values.len() == tree::DIMENSIONS * tree::DIMENSIONS
-                        {
-                            match Array2::from_shape_vec((dims[0], dims[1]), values) {
-                                Ok(matrix) => {
-                                    log::info!("Loaded learned Mahalanobis matrix from '{}'", path);
-                                    return Some(matrix);
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to construct matrix: {}", e);
-                                }
-                            }
-                        } else {
-                            log::error!("Matrix dimensions {:?} don't match expected {}x{}", dims, tree::DIMENSIONS, tree::DIMENSIONS);
-                        }
-                    } else {
-                        log::error!("Matrix JSON missing 'dim' or 'data' fields");
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to parse matrix JSON: {}", e);
-                }
-            }
+    match bliss_mixer_core::matrix::load_learned_matrix(matrix_path) {
+        Ok(matrix) => {
+            log::info!("Loaded learned Mahalanobis matrix from '{}'", path);
+            Some(matrix)
         }
-        Err(e) => {
-            log::error!("Failed to read matrix file '{}': {}", path, e);
+        Err(error) => {
+            log::error!("Failed to load matrix file '{}': {}", path, error);
+            None
         }
     }
-    None
 }
 
 async fn send_port_to_lms(lms_server: &String, port: u16) {

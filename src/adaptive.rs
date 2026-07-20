@@ -6,8 +6,8 @@
  *
  **/
 use crate::tree;
-use bliss_audio::playlist::variance_based_weight_matrix;
-use ndarray::{Array1, Array2};
+use bliss_mixer_core::scoring::{mean_feature_vector, select_adaptive_matrix, AdaptiveAlgorithm};
+use ndarray::Array2;
 
 pub struct MatrixSelection {
     pub matrix: Option<Array2<f32>>,
@@ -19,103 +19,56 @@ pub fn select_matrix(
     learned_matrix: Option<&Array2<f32>>,
     learnedblend: u16,
 ) -> MatrixSelection {
-    if seed_raw_metrics.len() >= 2 {
-        let seed_arrays: Vec<Array1<f32>> = seed_raw_metrics
-            .iter()
-            .map(|metrics| Array1::from_vec(metrics.to_vec()))
-            .collect();
-        return match (variance_based_weight_matrix(&seed_arrays), learned_matrix) {
-            (Ok(variance), Some(learned)) => {
-                // Preserve exact endpoints to avoid IEEE 754 inf*0.0=NaN if
-                // a matrix implementation yields non-finite variance entries.
-                let matrix = if learnedblend == 100 {
-                    learned.clone()
-                } else if learnedblend == 0 {
-                    variance
-                } else {
-                    let alpha = learnedblend as f32 / 100.0;
-                    learned * alpha + &variance * (1.0 - alpha)
-                };
-                log::debug!(
-                    "Blending learned (alpha={:.2}) and variance matrices from {} seeds",
-                    learnedblend as f32 / 100.0,
-                    seed_raw_metrics.len()
-                );
-                MatrixSelection {
-                    matrix: Some(matrix),
-                    algorithm_name: format!("blended(learned={}%)", learnedblend),
-                }
-            }
-            (Ok(variance), None) => {
-                log::debug!(
-                    "Using variance-based adaptive weight matrix from {} seeds",
-                    seed_raw_metrics.len()
-                );
-                MatrixSelection {
-                    matrix: Some(variance),
-                    algorithm_name: "variance-based".to_string(),
-                }
-            }
-            (Err(error), Some(learned)) => {
-                log::warn!(
-                    "Failed to build variance-based matrix: {}. Falling back to learned matrix.",
-                    error
-                );
-                MatrixSelection {
-                    matrix: Some(learned.clone()),
-                    algorithm_name: "learned-matrix".to_string(),
-                }
-            }
-            (Err(error), None) => {
-                log::warn!(
-                    "Failed to build variance-based matrix: {}. Falling back to standard algorithm.",
-                    error
-                );
-                MatrixSelection {
-                    matrix: None,
-                    algorithm_name: "none".to_string(),
-                }
-            }
-        };
+    let selection = select_adaptive_matrix(seed_raw_metrics, learned_matrix, learnedblend)
+        .expect("learned blend is validated by the mixer CLI");
+
+    match &selection.algorithm {
+        AdaptiveAlgorithm::Blended { learned_percent } => log::debug!(
+            "Blending learned (alpha={:.2}) and variance matrices from {} seeds",
+            *learned_percent as f32 / 100.0,
+            seed_raw_metrics.len()
+        ),
+        AdaptiveAlgorithm::VarianceBased => log::debug!(
+            "Using variance-based adaptive weight matrix from {} seeds",
+            seed_raw_metrics.len()
+        ),
+        AdaptiveAlgorithm::LearnedMatrix if seed_raw_metrics.len() == 1 => {
+            log::debug!("Using learned Mahalanobis matrix for single seed")
+        }
+        _ => {}
     }
 
-    if !seed_raw_metrics.is_empty() {
-        if let Some(learned) = learned_matrix {
-            log::debug!("Using learned Mahalanobis matrix for single seed");
-            return MatrixSelection {
-                matrix: Some(learned.clone()),
-                algorithm_name: "learned-matrix".to_string(),
-            };
+    if let Some(error) = &selection.variance_failure {
+        if selection.matrix.is_some() {
+            log::warn!(
+                "Failed to build variance-based matrix: {}. Falling back to learned matrix.",
+                error
+            );
+        } else {
+            log::warn!(
+                "Failed to build variance-based matrix: {}. Falling back to standard algorithm.",
+                error
+            );
         }
     }
 
     MatrixSelection {
-        matrix: None,
-        algorithm_name: "none".to_string(),
+        matrix: selection.matrix,
+        algorithm_name: selection.algorithm.to_string(),
     }
 }
 
 pub fn mean_metrics(
     seed_raw_metrics: &[[f32; tree::DIMENSIONS]],
 ) -> Option<[f32; tree::DIMENSIONS]> {
-    if seed_raw_metrics.is_empty() {
-        return None;
-    }
-    let mut mean = [0.0; tree::DIMENSIONS];
-    for raw in seed_raw_metrics {
-        for (mean_value, raw_value) in mean.iter_mut().zip(raw) {
-            *mean_value += raw_value;
-        }
-    }
-    for value in &mut mean {
-        *value /= seed_raw_metrics.len() as f32;
-    }
-    Some(mean)
+    mean_feature_vector(seed_raw_metrics)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bliss_audio::playlist::variance_based_weight_matrix;
+    use ndarray::Array1;
 
     fn identity() -> Array2<f32> {
         Array2::eye(tree::DIMENSIONS)

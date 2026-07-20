@@ -453,7 +453,7 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 [[package]]
 name = "bliss-audio"
 version = "0.11.3"
-source = "git+https://github.com/Polochon-street/bliss-rs.git#010a5dcb111242eda2113834fd2b288605dd1ce7"
+source = "git+https://github.com/Polochon-street/bliss-rs.git?rev=010a5dcb111242eda2113834fd2b288605dd1ce7#010a5dcb111242eda2113834fd2b288605dd1ce7"
 dependencies = [
  "adler32",
  "extended-isolation-forest",
@@ -474,6 +474,7 @@ dependencies = [
  "actix-web",
  "argparse",
  "bliss-audio",
+ "bliss-mixer-core",
  "chrono",
  "env_logger",
  "extended-isolation-forest",
@@ -489,6 +490,17 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
+]
+
+[[package]]
+name = "bliss-mixer-core"
+version = "0.1.0"
+source = "git+https://github.com/chrober/bliss-mixer-core.git?rev=0f6fd80c04d6f4448d5d58ba98112c1e7099ade1#0f6fd80c04d6f4448d5d58ba98112c1e7099ade1"
+dependencies = [
+ "bliss-audio",
+ "ndarray",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
