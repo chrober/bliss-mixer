@@ -4,7 +4,7 @@ BlissMixer provides a simple HTTP API for the mixing tracks and getting list of 
 
 ## Mix
 
-This API is used to provide a list of tracks based upon a provied list of seed tracks. This is the main
+This API is used to provide a list of tracks based upon a provided list of seed tracks. This is the main
 API used by the Lyrion `Don't Stop The Music` mixer. API request payload is a JSON string, and the
 response is a new-line separated list of tracks.
 
@@ -22,11 +22,12 @@ response is a new-line separated list of tracks.
 | forest      | Bool (1/0)                | Use `extended isolation forest` when 4 (or more) seed tracks. | `0`             |
 | norepart    | Int                       | Don't repeat an artist for N tracks.                          | `0`             |
 | norepalb    | Int                       | Don't repeat an album for N tracks.                           | `0`             |
-| genregroups | Array of array of strings | List of genre groups, used when filering on genre.            | _(mandatory)_   |
+| genregroups | Array of array of strings | List of genre groups, used when filtering on genre.            | _(mandatory)_   |
 | allgenres   | Bool (1/0)                | When checking if a track is in a genre group, should group contain all of track's genres or any of track's genres. | `0`           |
 | adaptiveweights | Bool (1/0)            | Use adaptive weighting instead of static weights. Requires 2+ seed tracks. | `0` |
 | learnedblend   | Int (0-100)            | Blend ratio for combining learned and variance matrices. 0 = pure variance, 100 = pure learned. Only effective when `adaptiveweights=1` and a learned matrix is loaded. | `50` |
 | debug       | Bool (1/0)                | Include debug diagnostics in `X-Bliss-Debug` response header (only applies when `adaptiveweights=1`). | `0` |
+| json        | Bool (1/0)                | Return response as JSON object.                               | `0`           |
 
 
 Notes:
@@ -84,6 +85,18 @@ ArtistP/AlbumH/Track10.ogg
 ArtistF/AlbumE/Track2.ogg
 ```
 
+When `json=1`:
+
+```json
+[
+    { "file":"ArtistZ/AlbumY/Track5.ogg", "sim":"0.012345" },
+    { "file":"ArtistW/AlbumG/Track9.ogg", "sim":"0.012445" },
+    { "file":"ArtistD/AlbumA/Track2.ogg", "sim":"0.0134567" },
+    { "file":"ArtistP/AlbumH/Track10.ogg", "sim":"0.0134678" },
+    { "file":"ArtistF/AlbumE/Track2.ogg", "sim":"0.0234567" }
+]
+```
+
 When `adaptiveweights=1` and `debug=1`, the response also includes an `X-Bliss-Debug` header:
 
 ```json
@@ -119,6 +132,7 @@ When `adaptiveweights=1` and `debug=1`, the response also includes an `X-Bliss-D
 }
 ```
 
+
 ## List
 
 This API is used to query for an ordered list of tracks similar to provided track. API request payload
@@ -135,6 +149,7 @@ is a JSON string, and the response is a new-line separated list of tracks.
 | genregroups | Array of array of strings | List of genre groups, used when filering on genre.        | _(mandatory)_ |
 | allgenres   | Bool (1/0)                | When checking if a track is in a genre group, should group contain all of track's genres or any of track's genres. | `0`           |
 | byartist    | Bool (1/0)                | Restrict to tracks of same artist.                        | _(mandatory)_ |
+| json        | Bool (1/0)                | Return response as JSON object.                           | `0`           |
 
 Notes:
 * Set `maxbmpdiff` to 0 (or omit the field) to disable BPM difference checking.
@@ -167,14 +182,23 @@ Get 2 tracks (from 30 seconds to 5 minutes), from the same artist, similar to "A
 
 Send via CURL:
 ```bash
-curl 'http://localhost:12000/api/list' --compressed -X POST -H 'Content-Type: application/json' --data-raw '{"count":2,"filtergenre":1,"min":60,"max":300,"maxbpmdiff":0,"track":"Artist/Album/Track.ogg","genregroups":[["Rock","Metal"],["Dance","R&B","Pop"]],"byartist":0}'
+curl 'http://localhost:12000/api/list' --compressed -X POST -H 'Content-Type: application/json' --data-raw '{"count":2,"filtergenre":1,"min":60,"max":300,"maxbpmdiff":0,"track":"Artist/Album/Track.ogg","genregroups":[["Rock","Metal"],["Dance","R&B","Pop"]],"byartist":1}'
 ```
 
 Example response:
 
 ```text
-ArtistZ/AlbumY/Track5.ogg
-ArtistW/AlbumG/Track9.ogg
+Artist/AlbumY/Track5.ogg
+Artist/AlbumG/Track9.ogg
+```
+
+When `json=1`:
+
+```json
+[
+    { "file":"Artist/AlbumY/Track5.ogg", "sim":"0.012345" },
+    { "file":"Artist/AlbumG/Track9.ogg", "sim":"0.012445" }
+]
 ```
 
 ## Hints for use
