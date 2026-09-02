@@ -11,8 +11,10 @@ rm -rf $DESTDIR/bin/*
 function build {
     echo Building for $1 to $3...
 
+    rustup target add $1
+
     if [[ ! -f /build/$1/release/bliss-mixer ]]; then
-        cargo build --release --target $1
+        cargo build --locked --release --target $1
     fi
 
     $2 /build/$1/release/bliss-mixer && cp /build/$1/release/bliss-mixer $DESTDIR/$3
