@@ -1,7 +1,13 @@
+0.8.1
+-----
+1. Optionally return JSON object as response - array of files & similarity
+   score.
+
 0.8.0
 -----
 1. Add adaptive weighting for mix selection. Thanks to chrober for
    implementing.
+2. Set utf-8 in response header.
 
 0.7.0
 -----
