@@ -110,6 +110,8 @@ pub struct ListParams {
     genregroups: Vec<Vec<String>>,
     allgenres: Option<u16>,
     byartist: i16,
+    adaptiveweights: Option<u16>,
+    learnedblend: Option<u16>,
     json: Option<u16>,
 }
 
@@ -963,6 +965,8 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
     let maxbpmdiff = payload.maxbpmdiff.unwrap_or(0);
     let track = &payload.track;
     let byartist = payload.byartist;
+    let useadaptiveweights = payload.adaptiveweights.unwrap_or(0);
+    let learnedblend = payload.learnedblend.unwrap_or(50).min(100);
     let genregroups = expand_globbed_genres(&payload.genregroups, &all_db_genres);
     let allgenres = payload.allgenres.unwrap_or(0);
     let mut acceptable_genres: HashSet<String> = HashSet::new();
@@ -999,13 +1003,47 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
         if let Ok(metrics) = db.get_metrics(seed.id) {
             let mut sim_tracks: Vec<tree::Sim> = Vec::new();
 
-            if byartist == 1 {
-                let vals = db.load_artist_tree(&seed.orig_artist);
-                let tree = tree::Tree::new(&vals);
-                sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
-            } else {
-                let tree = req.app_data::<web::Data<tree::Tree>>().unwrap();
-                sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+            if useadaptiveweights == 1 {
+                let learned_matrix = req
+                    .app_data::<web::Data<Option<Array2<f32>>>>()
+                    .unwrap();
+                if let Ok(raw_seed) = db.get_raw_metrics(seed.id) {
+                    let selection = crate::adaptive::select_matrix(
+                        &[raw_seed],
+                        learned_matrix.get_ref().as_ref(),
+                        learnedblend,
+                    );
+                    if let Some(matrix) = selection.matrix {
+                        let candidates = if byartist == 1 {
+                            db.get_raw_metrics_by_artist(&seed.orig_artist)
+                        } else {
+                            db.get_all_raw_metrics()
+                        };
+                        sim_tracks =
+                            adaptive_list_similarities(seed.id, &raw_seed, &candidates, &matrix);
+                        log::debug!(
+                            "Using {} for similar-track list (byartist={})",
+                            selection.algorithm_name,
+                            byartist
+                        );
+                    }
+                }
+            }
+
+            if sim_tracks.is_empty() {
+                if useadaptiveweights == 1 {
+                    log::debug!(
+                        "Adaptive list scoring unavailable; falling back to static weights"
+                    );
+                }
+                if byartist == 1 {
+                    let vals = db.load_artist_tree(&seed.orig_artist);
+                    let tree = tree::Tree::new(&vals);
+                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                } else {
+                    let tree = req.app_data::<web::Data<tree::Tree>>().unwrap();
+                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                }
             }
 
             for sim_track in sim_tracks {
@@ -1072,6 +1110,63 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
     http_resp.body(resp)
 }
 
+fn adaptive_list_similarities(
+    seed_id: u64,
+    seed: &[f32; tree::DIMENSIONS],
+    candidates: &[(u64, [f32; tree::DIMENSIONS])],
+    matrix: &Array2<f32>,
+) -> Vec<tree::Sim> {
+    let mut similarities: Vec<tree::Sim> = candidates
+        .par_iter()
+        .filter_map(|(id, metrics)| {
+            (*id != seed_id).then(|| tree::Sim {
+                id: *id,
+                sim: bliss_mixer_core::scoring::adaptive_distance(seed, metrics, matrix),
+            })
+        })
+        .collect();
+    similarities.sort_by(|left, right| left.sim.total_cmp(&right.sim));
+    similarities.truncate(MIN_NUM_SIM);
+    similarities
+}
+
 pub async fn ready() -> impl Responder {
     "1"
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[test]
+    fn list_payload_accepts_adaptive_metric_controls() {
+        let payload: ListParams = serde_json::from_value(serde_json::json!({
+            "track": "seed.flac",
+            "genregroups": [],
+            "byartist": 1,
+            "adaptiveweights": 1,
+            "learnedblend": 75
+        }))
+        .unwrap();
+
+        assert_eq!(payload.adaptiveweights, Some(1));
+        assert_eq!(payload.learnedblend, Some(75));
+        assert_eq!(payload.byartist, 1);
+    }
+
+    #[test]
+    fn adaptive_list_scoring_excludes_seed_and_orders_by_learned_distance() {
+        let seed = [0.0; tree::DIMENSIONS];
+        let near = [1.0; tree::DIMENSIONS];
+        let far = [2.0; tree::DIMENSIONS];
+        let candidates = vec![(1, seed), (2, far), (3, near)];
+        let matrix = Array2::eye(tree::DIMENSIONS);
+
+        let similarities = adaptive_list_similarities(1, &seed, &candidates, &matrix);
+
+        assert_eq!(similarities.len(), 2);
+        assert_eq!(similarities[0].id, 3);
+        assert_eq!(similarities[1].id, 2);
+        assert!(similarities[0].sim < similarities[1].sim);
+    }
 }

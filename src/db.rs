@@ -362,6 +362,45 @@ impl Db {
         log::debug!("Loaded {} raw metrics for full scan", results.len());
         results
     }
+
+    pub fn get_raw_metrics_by_artist(
+        &self,
+        artist: &str,
+    ) -> Vec<(u64, [f32; tree::DIMENSIONS])> {
+        let mut results: Vec<(u64, [f32; tree::DIMENSIONS])> = Vec::new();
+        match self.conn.prepare("SELECT Tempo, Zcr, MeanSpectralCentroid, StdDevSpectralCentroid, MeanSpectralRolloff, StdDevSpectralRolloff, MeanSpectralFlatness, StdDevSpectralFlatness, MeanLoudness, StdDevLoudness, Chroma1, Chroma2, Chroma3, Chroma4, Chroma5, Chroma6, Chroma7, Chroma8, Chroma9, Chroma10, Chroma11, Chroma12, Chroma13, rowid FROM TracksV2 WHERE Artist=:artist;") {
+            Ok(mut stmt) => {
+                let track_iter = stmt.query_map(&[(":artist", &artist)], |row| {
+                    Ok((
+                        row.get(0)?,  row.get(1)?,  row.get(2)?,  row.get(3)?,
+                        row.get(4)?,  row.get(5)?,  row.get(6)?,  row.get(7)?,
+                        row.get(8)?,  row.get(9)?,  row.get(10)?, row.get(11)?,
+                        row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?,
+                        row.get(16)?, row.get(17)?, row.get(18)?, row.get(19)?,
+                        row.get(20)?, row.get(21)?, row.get(22)?, row.get::<_, u64>(23)?,
+                    ))
+                }).unwrap();
+                for tr in track_iter {
+                    let t = tr.unwrap();
+                    let metrics: [f32; tree::DIMENSIONS] = [
+                        t.0,  t.1,  t.2,  t.3,  t.4,  t.5,  t.6,  t.7,
+                        t.8,  t.9,  t.10, t.11, t.12, t.13, t.14, t.15,
+                        t.16, t.17, t.18, t.19, t.20, t.21, t.22,
+                    ];
+                    results.push((t.23, metrics));
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to load raw metrics for artist '{}': {}", artist, e);
+            }
+        }
+        log::debug!(
+            "Loaded {} raw metrics for artist '{}'",
+            results.len(),
+            artist
+        );
+        results
+    }
 }
 
 #[cfg(test)]
@@ -437,5 +476,20 @@ mod tests {
         assert_eq!(genres.len(), 2);
         assert!(genres.contains("Rock"));
         assert!(genres.contains("Electronic"));
+    }
+
+    #[test]
+    fn artist_raw_scan_uses_exact_artist_and_preserves_list_semantics() {
+        let db = fixture_db();
+        let fixture = db.get_raw_metrics_by_artist("Fixture artist");
+        assert_eq!(fixture.len(), 1);
+        assert_eq!(fixture[0].0, 1);
+        assert_eq!(fixture[0].1[0], 1.0);
+
+        let ignored = db.get_raw_metrics_by_artist("Ignored artist");
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].0, 2);
+        assert_eq!(ignored[0].1[0], 101.0);
+        assert!(db.get_raw_metrics_by_artist("fixture artist").is_empty());
     }
 }

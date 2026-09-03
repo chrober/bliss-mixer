@@ -5,6 +5,12 @@ existing SQLite database of song analysis as created by [Bliss Analyser](https:/
 
 The API served is intended to be used by the [Bliss LMS DSTM plugin](https://github.com/CDrummond/lms-blissmixer).
 
+The `/api/list` endpoint accepts optional `adaptiveweights` and `learnedblend`
+fields. When adaptive weighting is enabled and a learned matrix is loaded, the
+similar-track list is ranked with that matrix. `byartist=1` applies the same
+ranking within the seed track's artist; if adaptive scoring is unavailable,
+the endpoint retains its static-weight fallback.
+
 
 # Building
 
