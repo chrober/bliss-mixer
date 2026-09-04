@@ -29,6 +29,6 @@ noisy_float = "0.2.0"
 rayon = "1.11.0"
 num_cpus = "1.13.0"
 bliss-audio = { git = "https://github.com/Polochon-street/bliss-rs.git", rev = "010a5dcb111242eda2113834fd2b288605dd1ce7", default-features = false }
-bliss-mixer-core = { git = "https://github.com/chrober/bliss-mixer-core.git", rev = "0f6fd80c04d6f4448d5d58ba98112c1e7099ade1" }
+bliss-mixer-core = { git = "https://github.com/chrober/bliss-mixer-core.git", rev = "a605edc2b61b525bd75bb3d350fd4b41235cf5d6" }
 ndarray = "0.16.1"
 strum = "0.27.1"
