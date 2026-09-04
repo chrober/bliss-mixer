@@ -6,7 +6,8 @@ RUN set -eux; \
     for attempt in 1 2 3; do \
         apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true update && \
         apt-get -o Acquire::Retries=3 -y install \
-            curl git build-essential gcc-multilib musl-tools musl-dev musl \
+            curl git build-essential gcc-multilib musl-tools musl-dev musl && \
+        apt-get -o Acquire::Retries=3 -y install \
             crossbuild-essential-armhf crossbuild-essential-arm64 && \
         exit 0; \
         rm -rf /var/lib/apt/lists/*; \
