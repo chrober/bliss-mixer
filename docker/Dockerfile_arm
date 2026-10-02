@@ -1,5 +1,7 @@
 FROM debian:bullseye
 
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list
+
 RUN dpkg --add-architecture arm64 && \
     dpkg --add-architecture armhf
 RUN set -eux; \
