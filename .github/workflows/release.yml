@@ -25,6 +25,9 @@ on:
 permissions:
   contents: write
 
+env:
+  LINUX_BUILDER_DEBIAN: bookworm
+
 jobs:
   metadata:
     runs-on: ubuntu-latest
@@ -68,6 +71,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare Debian Bookworm x86 builder
+        run: |
+          set -euo pipefail
+          if grep -q 'bullseye' docker/Dockerfile_x86; then
+            sed -i "s/bullseye/${LINUX_BUILDER_DEBIAN}/g" docker/Dockerfile_x86
+          fi
+          grep -F "FROM debian:${LINUX_BUILDER_DEBIAN}" docker/Dockerfile_x86
+          grep -F "${LINUX_BUILDER_DEBIAN}-security main" docker/Dockerfile_x86
+          if grep -q 'bullseye' docker/Dockerfile_x86; then
+            echo "Dockerfile_x86 still contains Bullseye references" >&2
+            exit 1
+          fi
       - name: Build x86_64 musl binary
         run: |
           set -euo pipefail
@@ -90,6 +105,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare Debian Bookworm ARM builder
+        run: |
+          set -euo pipefail
+          if grep -q 'bullseye' docker/Dockerfile_arm; then
+            sed -i "s/bullseye/${LINUX_BUILDER_DEBIAN}/g" docker/Dockerfile_arm
+          fi
+          grep -F "FROM debian:${LINUX_BUILDER_DEBIAN}" docker/Dockerfile_arm
+          grep -F "${LINUX_BUILDER_DEBIAN}-security main" docker/Dockerfile_arm
+          if grep -q 'bullseye' docker/Dockerfile_arm; then
+            echo "Dockerfile_arm still contains Bullseye references" >&2
+            exit 1
+          fi
       - name: Build ARM binaries
         run: |
           set -euo pipefail
