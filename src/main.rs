@@ -17,6 +17,7 @@ mod adaptive;
 mod api;
 mod db;
 mod forest;
+mod guidance;
 mod tree;
 mod upload;
 
@@ -175,6 +176,7 @@ async fn main() -> std::io::Result<()> {
                 .data(db_path.clone())
                 .data(learned_matrix.clone())
                 .route("/api/mix", web::post().to(api::mix))
+                .route("/api/guidance/score", web::post().to(api::guidance_score))
                 .route("/api/list", web::post().to(api::list))
                 .route("/api/ready", web::get().to(api::ready))
         }).bind((address, port))?;

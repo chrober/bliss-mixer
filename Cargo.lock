@@ -475,6 +475,7 @@ dependencies = [
  "argparse",
  "bliss-audio",
  "bliss-mixer-core",
+ "bliss-playlist-guidance-spi",
  "chrono",
  "env_logger",
  "extended-isolation-forest",
@@ -502,6 +503,15 @@ dependencies = [
  "ndarray",
  "rayon",
  "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "bliss-playlist-guidance-spi"
+version = "0.1.0"
+source = "git+https://github.com/chrober/bliss-playlist-guidance-spi.git?rev=78f03847b11b92b235b60ceef604dad3c07888a7#78f03847b11b92b235b60ceef604dad3c07888a7"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 

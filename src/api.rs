@@ -8,6 +8,7 @@
 
 use crate::db;
 use crate::forest;
+use crate::guidance;
 use crate::tree;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use bliss_audio::AnalysisIndex;
@@ -24,6 +25,7 @@ use std::num::NonZero;
 use std::time::Instant;
 use strum::IntoEnumIterator;
 use serde_json::json;
+use bliss_playlist_guidance_spi::{GuidanceHostRequestV1, GuidanceHostResponseV1};
 
 const CHRISTMAS: &str = "christmas";
 const VARIOUS: &str = "various";
@@ -1108,6 +1110,28 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
     }
 
     http_resp.body(resp)
+}
+
+/// Runs one trusted, bounded provider session for an already Bliss-qualified
+/// DSTM candidate batch. The caller falls back to Bliss-only results when the
+/// returned `valid` flag is false.
+pub async fn guidance_score(payload: web::Json<GuidanceHostRequestV1>) -> HttpResponse {
+    let request = payload.into_inner();
+    let response: GuidanceHostResponseV1 = match web::block(move || {
+        Ok::<_, std::io::Error>(guidance::score(request))
+    })
+    .await {
+        Ok(response) => response,
+        Err(error) => GuidanceHostResponseV1 {
+            response_version: "guidance_host_response_v1".into(),
+            valid: false,
+            signals: vec![],
+            diagnostics: bliss_playlist_guidance_spi::Diagnostics::default(),
+            selection_trace: None,
+            diagnostic: format!("native guidance task failed: {error}"),
+        },
+    };
+    HttpResponse::Ok().json(response)
 }
 
 fn adaptive_list_similarities(
