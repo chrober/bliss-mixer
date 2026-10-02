@@ -273,7 +273,23 @@ mod tests {
             "{\"type\":\"scores\",\"provider_id\":\"library-signals-guidance\",\"request_id\":\"dstm-candidate-pool\",\"signals\":[{\"candidate_id\":\"file:///music/example.flac\",\"channel\":\"playcount\",\"scope\":\"global\",\"score\":-0.5,\"confidence\":1.0,\"observation\":{\"playcount\":2}}],\"diagnostics\":{}}\n",
             "{\"type\":\"closed\",\"provider_id\":\"library-signals-guidance\"}\n"
         );
-        ("sh".into(), vec!["-c".into(), format!("printf '%s' '{transcript}'")])
+        let mut responses = transcript.lines();
+        let manifest = responses.next().unwrap();
+        let prepared = responses.next().unwrap();
+        let scores = responses.next().unwrap();
+        let closed = responses.next().unwrap();
+        (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "read _; printf '%s\\n' '{manifest}'; \
+                     read _; printf '%s\\n' '{prepared}'; \
+                     read _; printf '%s\\n' '{scores}'; \
+                     read _; printf '%s\\n' '{closed}'"
+                ),
+            ],
+        )
     }
 
     #[test]
