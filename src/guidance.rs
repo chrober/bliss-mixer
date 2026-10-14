@@ -352,7 +352,9 @@ mod tests {
             request_version: "guidance_host_request_v1".into(),
             job_id: "mix-42".into(),
             request_id: "dstm-candidate-pool".into(),
-            deadline_ms: 500,
+            // Windows CI can take more than 500 ms merely to start PowerShell;
+            // this test verifies the protocol exchange, not the production deadline.
+            deadline_ms: 5_000,
             provider: GuidanceProviderConfig {
                 provider_id: "library-signals-guidance".into(),
                 program,
