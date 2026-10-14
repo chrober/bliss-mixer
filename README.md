@@ -11,6 +11,12 @@ similar-track list is ranked with that matrix. `byartist=1` applies the same
 ranking within the seed track's artist; if adaptive scoring is unavailable,
 the endpoint retains its static-weight fallback.
 
+The `/api/guidance/score` endpoint hosts one provider-scoring session for a
+Bliss-qualified DSTM candidate pool. Provider prepare and score diagnostics,
+including bounded `guidance_log_event_v1` objects, are returned to the Lyrion
+caller in original order. The native mixer does not render or rewrite those
+provider-owned log events.
+
 
 # Building
 
