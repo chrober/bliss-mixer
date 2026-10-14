@@ -107,7 +107,7 @@ fn exchange_session(
                 options: request.provider.options.clone(),
                 artifacts: request.provider.artifacts.clone(),
                 resources: request.provider.resources.clone(),
-                anchors: vec![],
+                anchors: request.anchors.clone(),
             },
         )?,
         "prepared",
@@ -246,8 +246,8 @@ fn contribution(policy: &Value, signal: &GuidanceSignal) -> f64 {
 mod tests {
     use super::*;
     use bliss_playlist_guidance_spi::{
-        Candidate, GuidanceHostRequestV1, GuidanceProviderConfig, GuidanceScope, GuidanceSignal,
-        ScoreContext,
+        Anchor, Candidate, GuidanceHostRequestV1, GuidanceProviderConfig, GuidanceScope,
+        GuidanceSignal, ScoreContext,
     };
     use serde_json::json;
 
@@ -308,6 +308,7 @@ mod tests {
                 resources: vec![],
             },
             policy: json!({ "playcount_influence": -80 }),
+            anchors: vec![],
             context: ScoreContext {
                 scope: GuidanceScope::Global,
                 left_anchor_id: None,
@@ -361,6 +362,7 @@ mod tests {
                 resources: vec![],
             },
             policy: json!({ "playcount_influence": -80 }),
+            anchors: vec![],
             context: ScoreContext {
                 scope: GuidanceScope::Global,
                 left_anchor_id: None,
@@ -382,5 +384,63 @@ mod tests {
         assert!(response.valid, "{}", response.diagnostic);
         assert_eq!(response.signals.len(), 1);
         assert_eq!(response.selection_trace.unwrap().candidates[0].guidance[0].channel, "playcount");
+    }
+
+    #[test]
+    fn native_host_forwards_source_anchors_to_provider_prepare() {
+        let (program, argv) = fixture_provider_command();
+        let request = GuidanceHostRequestV1 {
+            request_version: "guidance_host_request_v1".into(),
+            job_id: "mix-anchors".into(),
+            request_id: "dstm-candidate-pool".into(),
+            deadline_ms: 500,
+            provider: GuidanceProviderConfig {
+                provider_id: "library-signals-guidance".into(),
+                program,
+                argv,
+                options: json!({}),
+                artifacts: vec![],
+                resources: vec![],
+            },
+            policy: json!({}),
+            anchors: vec![Anchor {
+                anchor_id: "seed-1".into(),
+                track: Candidate {
+                    candidate_id: "file:///music/seed.flac".into(),
+                    lms_urlmd5: Some("seed-md5".into()),
+                    database_file: None,
+                    title: Some("Seed Song".into()),
+                    artist: Some("Seed Artist".into()),
+                    album: None,
+                    recording_mbid: Some("recording-mbid".into()),
+                    artist_mbids: vec!["artist-mbid".into()],
+                },
+            }],
+            context: ScoreContext {
+                scope: GuidanceScope::Global,
+                left_anchor_id: None,
+                right_anchor_id: None,
+                context_track_ids: vec!["seed-1".into()],
+            },
+            candidates: vec![],
+        };
+        let transcript = concat!(
+            "{\"type\":\"manifest\",\"spi_version\":2,\"provider_id\":\"library-signals-guidance\",\"provider_version\":\"fixture\",\"protocol\":\"bliss-guidance-jsonl-v2\",\"capabilities\":[\"global_candidate_guidance\"],\"channels\":[]}\n",
+            "{\"type\":\"prepared\",\"provider_id\":\"library-signals-guidance\",\"snapshot_id\":null,\"diagnostics\":{}}\n",
+            "{\"type\":\"scores\",\"provider_id\":\"library-signals-guidance\",\"request_id\":\"dstm-candidate-pool\",\"signals\":[],\"diagnostics\":{}}\n",
+            "{\"type\":\"closed\",\"provider_id\":\"library-signals-guidance\"}\n"
+        );
+        let mut written = Vec::new();
+
+        exchange_session(&mut written, transcript.as_bytes(), &request).unwrap();
+
+        let requests = String::from_utf8(written).unwrap();
+        let prepare: GuidanceRequest = serde_json::from_str(requests.lines().nth(1).unwrap()).unwrap();
+        match prepare {
+            GuidanceRequest::Prepare { anchors, .. } => {
+                assert_eq!(anchors, request.anchors);
+            }
+            _ => panic!("second request must be prepare"),
+        }
     }
 }
