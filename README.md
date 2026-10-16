@@ -34,7 +34,7 @@ $ bliss-mixer
 ```
 ## Binary releases
 
-Pushing a semantic version tag such as `v0.11.4` runs
+Pushing a semantic version tag such as `v0.11.5` runs
 `.github/workflows/release.yml`. The workflow tests the source, builds native
 binaries for x86_64 Linux, ARM64 Linux, ARMHF Linux, universal macOS, and
 Windows, publishes SHA-256 files, and creates or updates the GitHub Release.
