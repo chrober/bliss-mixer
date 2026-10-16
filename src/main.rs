@@ -13,9 +13,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process;
 use rayon::ThreadPoolBuilder;
+mod adaptive;
 mod api;
 mod db;
 mod forest;
+mod guidance;
 mod tree;
 mod upload;
 
@@ -25,61 +27,21 @@ fn load_learned_matrix(path: &str) -> Option<Array2<f32>> {
     if path.is_empty() {
         return None;
     }
-    let matrix_path = Path::new(path);
+    let matrix_path = std::path::Path::new(path);
     if !matrix_path.exists() {
         log::warn!("Matrix file '{}' does not exist", path);
         return None;
     }
-    match std::fs::read_to_string(matrix_path) {
-        Ok(contents) => {
-            match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(json) => {
-                    // Support blissify config.json format: {"m": {"v": 1, "dim": [N, N], "data": [...]}}
-                    let m_obj = if json.get("m").is_some() {
-                        json.get("m").unwrap()
-                    } else {
-                        &json
-                    };
-                    if let (Some(dim), Some(data)) = (m_obj.get("dim"), m_obj.get("data")) {
-                        let dims: Vec<usize> = dim.as_array()
-                            .unwrap_or(&vec![])
-                            .iter()
-                            .filter_map(|v| v.as_u64().map(|u| u as usize))
-                            .collect();
-                        let values: Vec<f32> = data.as_array()
-                            .unwrap_or(&vec![])
-                            .iter()
-                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                            .collect();
-                        if dims.len() == 2 && dims[0] == tree::DIMENSIONS && dims[1] == tree::DIMENSIONS
-                            && values.len() == tree::DIMENSIONS * tree::DIMENSIONS
-                        {
-                            match Array2::from_shape_vec((dims[0], dims[1]), values) {
-                                Ok(matrix) => {
-                                    log::info!("Loaded learned Mahalanobis matrix from '{}'", path);
-                                    return Some(matrix);
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to construct matrix: {}", e);
-                                }
-                            }
-                        } else {
-                            log::error!("Matrix dimensions {:?} don't match expected {}x{}", dims, tree::DIMENSIONS, tree::DIMENSIONS);
-                        }
-                    } else {
-                        log::error!("Matrix JSON missing 'dim' or 'data' fields");
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to parse matrix JSON: {}", e);
-                }
-            }
+    match bliss_mixer_core::matrix::load_learned_matrix(matrix_path) {
+        Ok(matrix) => {
+            log::info!("Loaded learned Mahalanobis matrix from '{}'", path);
+            Some(matrix)
         }
-        Err(e) => {
-            log::error!("Failed to read matrix file '{}': {}", path, e);
+        Err(error) => {
+            log::error!("Failed to load matrix file '{}': {}", path, error);
+            None
         }
     }
-    None
 }
 
 async fn send_port_to_lms(lms_server: &String, port: u16) {
@@ -214,11 +176,76 @@ async fn main() -> std::io::Result<()> {
                 .data(db_path.clone())
                 .data(learned_matrix.clone())
                 .route("/api/mix", web::post().to(api::mix))
+                .route("/api/guidance/score", web::post().to(api::guidance_score))
                 .route("/api/list", web::post().to(api::list))
                 .route("/api/ready", web::get().to(api::ready))
         }).bind((address, port))?;
         send_port_to_lms(&lms_server, server.addrs()[0].port()).await;
 
         server.run().await
+    }
+}
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn with_matrix_file(value: serde_json::Value, test: impl FnOnce(&str)) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "bliss-mixer-characterization-{}-{unique}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        test(path.to_str().unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn identity_values() -> Vec<f32> {
+        (0..tree::DIMENSIONS)
+            .flat_map(|row| {
+                (0..tree::DIMENSIONS).map(move |column| if row == column { 1.0 } else { 0.0 })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_matrix_path_disables_the_learned_metric() {
+        assert!(load_learned_matrix("").is_none());
+    }
+
+    #[test]
+    fn loads_blissify_wrapped_matrix_in_row_major_order() {
+        let payload = json!({
+            "m": {
+                "v": 1,
+                "dim": [tree::DIMENSIONS, tree::DIMENSIONS],
+                "data": identity_values()
+            }
+        });
+        with_matrix_file(payload, |path| {
+            let matrix = load_learned_matrix(path).expect("wrapped matrix should load");
+            assert_eq!(matrix.shape(), &[tree::DIMENSIONS, tree::DIMENSIONS]);
+            assert_eq!(matrix[(0, 0)], 1.0);
+            assert_eq!(matrix[(0, 1)], 0.0);
+            assert_eq!(matrix[(tree::DIMENSIONS - 1, tree::DIMENSIONS - 1)], 1.0);
+        });
+    }
+
+    #[test]
+    fn loads_unwrapped_matrix_and_rejects_wrong_dimensions() {
+        let valid = json!({
+            "dim": [tree::DIMENSIONS, tree::DIMENSIONS],
+            "data": identity_values()
+        });
+        with_matrix_file(valid, |path| assert!(load_learned_matrix(path).is_some()));
+
+        let invalid = json!({"dim": [2, 2], "data": [1.0, 0.0, 0.0, 1.0]});
+        with_matrix_file(invalid, |path| assert!(load_learned_matrix(path).is_none()));
     }
 }

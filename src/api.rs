@@ -8,10 +8,11 @@
 
 use crate::db;
 use crate::forest;
+use crate::guidance;
 use crate::tree;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use bliss_audio::AnalysisIndex;
-use bliss_audio::playlist::{mahalanobis_distance, variance_based_weight_matrix};
+use bliss_audio::playlist::mahalanobis_distance;
 use chrono::Datelike;
 use globset::Glob;
 use ndarray::{Array1, Array2};
@@ -24,6 +25,7 @@ use std::num::NonZero;
 use std::time::Instant;
 use strum::IntoEnumIterator;
 use serde_json::json;
+use bliss_playlist_guidance_spi::{GuidanceHostRequestV1, GuidanceHostResponseV1};
 
 const CHRISTMAS: &str = "christmas";
 const VARIOUS: &str = "various";
@@ -110,6 +112,8 @@ pub struct ListParams {
     genregroups: Vec<Vec<String>>,
     allgenres: Option<u16>,
     byartist: i16,
+    adaptiveweights: Option<u16>,
+    learnedblend: Option<u16>,
     json: Option<u16>,
 }
 
@@ -490,51 +494,14 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             }
         }
 
-        // Determine the weight matrix to use
-        let (weight_matrix, algorithm_name): (Option<Array2<f32>>, String) = if seed_raw_metrics.len() >= 2 {
-            // Multi-seed: compute variance-based weight matrix
-            let seed_arrays: Vec<Array1<f32>> = seed_raw_metrics.iter()
-                .map(|m| Array1::from_vec(m.to_vec()))
-                .collect();
-            let variance_matrix = variance_based_weight_matrix(&seed_arrays);
-
-            match (variance_matrix, learned_matrix.get_ref().as_ref()) {
-                (Ok(vm), Some(lm)) => {
-                    // Both available: blend them.
-                    // Special-case the extremes to avoid IEEE 754 inf*0.0=NaN when the
-                    // variance matrix has infinite entries (zero-variance features).
-                    let blended = if learnedblend == 100 {
-                        lm.clone()
-                    } else if learnedblend == 0 {
-                        vm
-                    } else {
-                        let alpha = learnedblend as f32 / 100.0;
-                        lm * alpha + &vm * (1.0 - alpha)
-                    };
-                    log::debug!("Blending learned (alpha={:.2}) and variance matrices from {} seeds",
-                                 learnedblend as f32 / 100.0, seed_raw_metrics.len());
-                    (Some(blended), format!("blended(learned={}%)", learnedblend))
-                }
-                (Ok(vm), None) => {
-                    log::debug!("Using variance-based adaptive weight matrix from {} seeds", seed_raw_metrics.len());
-                    (Some(vm), "variance-based".to_string())
-                }
-                (Err(err), Some(lm)) => {
-                    log::warn!("Failed to build variance-based matrix: {}. Falling back to learned matrix.", err);
-                    (Some(lm.clone()), "learned-matrix".to_string())
-                }
-                (Err(err), None) => {
-                    log::warn!("Failed to build variance-based matrix: {}. Falling back to standard algorithm.", err);
-                    (None, "none".to_string())
-                }
-            }
-        } else if !seed_raw_metrics.is_empty() && learned_matrix.is_some() {
-            // Single seed: use the learned Mahalanobis matrix
-            log::debug!("Using learned Mahalanobis matrix for single seed");
-            (learned_matrix.get_ref().clone(), "learned-matrix".to_string())
-        } else {
-            (None, "none".to_string())
-        };
+        // Determine the weight matrix to use.
+        let selection = crate::adaptive::select_matrix(
+            &seed_raw_metrics,
+            learned_matrix.get_ref().as_ref(),
+            learnedblend,
+        );
+        let weight_matrix = selection.matrix;
+        let algorithm_name = selection.algorithm_name;
 
         if let Some(ref matrix) = weight_matrix {
             log::debug!("Using adaptive weighting algorithm");
@@ -550,15 +517,8 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             }
 
             // Compute the mean of seed raw metrics (to use as the "ideal" point)
-            let mut mean_raw = [0.0f32; tree::DIMENSIONS];
-            for raw in &seed_raw_metrics {
-                for i in 0..tree::DIMENSIONS {
-                    mean_raw[i] += raw[i];
-                }
-            }
-            for i in 0..tree::DIMENSIONS {
-                mean_raw[i] /= seed_raw_metrics.len() as f32;
-            }
+            let mean_raw = crate::adaptive::mean_metrics(&seed_raw_metrics)
+                .expect("an adaptive matrix requires at least one seed");
 
             // Full DB scan: compute Mahalanobis distance for every track
             let t_db = Instant::now();
@@ -1007,6 +967,8 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
     let maxbpmdiff = payload.maxbpmdiff.unwrap_or(0);
     let track = &payload.track;
     let byartist = payload.byartist;
+    let useadaptiveweights = payload.adaptiveweights.unwrap_or(0);
+    let learnedblend = payload.learnedblend.unwrap_or(50).min(100);
     let genregroups = expand_globbed_genres(&payload.genregroups, &all_db_genres);
     let allgenres = payload.allgenres.unwrap_or(0);
     let mut acceptable_genres: HashSet<String> = HashSet::new();
@@ -1043,13 +1005,47 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
         if let Ok(metrics) = db.get_metrics(seed.id) {
             let mut sim_tracks: Vec<tree::Sim> = Vec::new();
 
-            if byartist == 1 {
-                let vals = db.load_artist_tree(&seed.orig_artist);
-                let tree = tree::Tree::new(&vals);
-                sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
-            } else {
-                let tree = req.app_data::<web::Data<tree::Tree>>().unwrap();
-                sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+            if useadaptiveweights == 1 {
+                let learned_matrix = req
+                    .app_data::<web::Data<Option<Array2<f32>>>>()
+                    .unwrap();
+                if let Ok(raw_seed) = db.get_raw_metrics(seed.id) {
+                    let selection = crate::adaptive::select_matrix(
+                        &[raw_seed],
+                        learned_matrix.get_ref().as_ref(),
+                        learnedblend,
+                    );
+                    if let Some(matrix) = selection.matrix {
+                        let candidates = if byartist == 1 {
+                            db.get_raw_metrics_by_artist(&seed.orig_artist)
+                        } else {
+                            db.get_all_raw_metrics()
+                        };
+                        sim_tracks =
+                            adaptive_list_similarities(seed.id, &raw_seed, &candidates, &matrix);
+                        log::debug!(
+                            "Using {} for similar-track list (byartist={})",
+                            selection.algorithm_name,
+                            byartist
+                        );
+                    }
+                }
+            }
+
+            if sim_tracks.is_empty() {
+                if useadaptiveweights == 1 {
+                    log::debug!(
+                        "Adaptive list scoring unavailable; falling back to static weights"
+                    );
+                }
+                if byartist == 1 {
+                    let vals = db.load_artist_tree(&seed.orig_artist);
+                    let tree = tree::Tree::new(&vals);
+                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                } else {
+                    let tree = req.app_data::<web::Data<tree::Tree>>().unwrap();
+                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                }
             }
 
             for sim_track in sim_tracks {
@@ -1116,6 +1112,85 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
     http_resp.body(resp)
 }
 
+/// Runs one trusted, bounded provider session for an already Bliss-qualified
+/// DSTM candidate batch. The caller falls back to Bliss-only results when the
+/// returned `valid` flag is false.
+pub async fn guidance_score(payload: web::Json<GuidanceHostRequestV1>) -> HttpResponse {
+    let request = payload.into_inner();
+    let response: GuidanceHostResponseV1 = match web::block(move || {
+        Ok::<_, std::io::Error>(guidance::score(request))
+    })
+    .await {
+        Ok(response) => response,
+        Err(error) => GuidanceHostResponseV1 {
+            response_version: "guidance_host_response_v1".into(),
+            valid: false,
+            signals: vec![],
+            diagnostics: bliss_playlist_guidance_spi::Diagnostics::default(),
+            selection_trace: None,
+            diagnostic: format!("native guidance task failed: {error}"),
+        },
+    };
+    HttpResponse::Ok().json(response)
+}
+
+fn adaptive_list_similarities(
+    seed_id: u64,
+    seed: &[f32; tree::DIMENSIONS],
+    candidates: &[(u64, [f32; tree::DIMENSIONS])],
+    matrix: &Array2<f32>,
+) -> Vec<tree::Sim> {
+    let mut similarities: Vec<tree::Sim> = candidates
+        .par_iter()
+        .filter_map(|(id, metrics)| {
+            (*id != seed_id).then(|| tree::Sim {
+                id: *id,
+                sim: bliss_mixer_core::scoring::adaptive_distance(seed, metrics, matrix),
+            })
+        })
+        .collect();
+    similarities.sort_by(|left, right| left.sim.total_cmp(&right.sim));
+    similarities.truncate(MIN_NUM_SIM);
+    similarities
+}
+
 pub async fn ready() -> impl Responder {
     "1"
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[test]
+    fn list_payload_accepts_adaptive_metric_controls() {
+        let payload: ListParams = serde_json::from_value(serde_json::json!({
+            "track": "seed.flac",
+            "genregroups": [],
+            "byartist": 1,
+            "adaptiveweights": 1,
+            "learnedblend": 75
+        }))
+        .unwrap();
+
+        assert_eq!(payload.adaptiveweights, Some(1));
+        assert_eq!(payload.learnedblend, Some(75));
+        assert_eq!(payload.byartist, 1);
+    }
+
+    #[test]
+    fn adaptive_list_scoring_excludes_seed_and_orders_by_learned_distance() {
+        let seed = [0.0; tree::DIMENSIONS];
+        let near = [1.0; tree::DIMENSIONS];
+        let far = [2.0; tree::DIMENSIONS];
+        let candidates = vec![(1, seed), (2, far), (3, near)];
+        let matrix = Array2::eye(tree::DIMENSIONS);
+
+        let similarities = adaptive_list_similarities(1, &seed, &candidates, &matrix);
+
+        assert_eq!(similarities.len(), 2);
+        assert_eq!(similarities[0].id, 3);
+        assert_eq!(similarities[1].id, 2);
+        assert!(similarities[0].sim < similarities[1].sim);
+    }
 }

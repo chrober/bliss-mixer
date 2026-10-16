@@ -1,6 +1,6 @@
 [package]
 name = "bliss-mixer"
-version = "0.8.1"
+version = "0.11.4"
 authors = ["Craig Drummond <craig.p.drummond@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-only"
@@ -28,6 +28,8 @@ extended-isolation-forest = { version = "0.2.3", default-features = false }
 noisy_float = "0.2.0"
 rayon = "1.11.0"
 num_cpus = "1.13.0"
-bliss-audio = { git = "https://github.com/Polochon-street/bliss-rs.git", default-features = false }
+bliss-audio = { git = "https://github.com/Polochon-street/bliss-rs.git", rev = "010a5dcb111242eda2113834fd2b288605dd1ce7", default-features = false }
+bliss-mixer-core = { git = "https://github.com/chrober/bliss-mixer-core.git", rev = "a605edc2b61b525bd75bb3d350fd4b41235cf5d6" }
+bliss-playlist-guidance-spi = { git = "https://github.com/chrober/bliss-playlist-guidance-spi.git", rev = "773b1a6" }
 ndarray = "0.16.1"
 strum = "0.27.1"

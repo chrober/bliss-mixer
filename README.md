@@ -5,10 +5,24 @@ existing SQLite database of song analysis as created by [Bliss Analyser](https:/
 
 The API served is intended to be used by the [Bliss LMS DSTM plugin](https://github.com/CDrummond/lms-blissmixer).
 
+The `/api/list` endpoint accepts optional `adaptiveweights` and `learnedblend`
+fields. When adaptive weighting is enabled and a learned matrix is loaded, the
+similar-track list is ranked with that matrix. `byartist=1` applies the same
+ranking within the seed track's artist; if adaptive scoring is unavailable,
+the endpoint retains its static-weight fallback.
+
+The `/api/guidance/score` endpoint hosts one provider-scoring session for a
+Bliss-qualified DSTM candidate pool. Provider prepare and score diagnostics,
+including bounded `guidance_log_event_v1` objects, are returned to the Lyrion
+caller in original order. The native mixer does not render or rewrite those
+provider-owned log events.
+
 
 # Building
 
-[Rust](https://www.rust-lang.org/tools/install) is require to build.
+Rust 1.97.1 is pinned by `rust-toolchain.toml`. Build with a local rustup
+installation or open the repository in its Dev Container for a self-contained
+Linux environment with Rust, SQLite tools, and Python.
 
 Build with `cargo build --release`
 
@@ -20,7 +34,7 @@ $ bliss-mixer
 ```
 ## Binary releases
 
-Pushing a semantic version tag such as `v0.8.1` runs
+Pushing a semantic version tag such as `v0.11.4` runs
 `.github/workflows/release.yml`. The workflow tests the source, builds native
 binaries for x86_64 Linux, ARM64 Linux, ARMHF Linux, universal macOS, and
 Windows, publishes SHA-256 files, and creates or updates the GitHub Release.

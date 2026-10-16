@@ -453,7 +453,7 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 [[package]]
 name = "bliss-audio"
 version = "0.11.3"
-source = "git+https://github.com/Polochon-street/bliss-rs.git#010a5dcb111242eda2113834fd2b288605dd1ce7"
+source = "git+https://github.com/Polochon-street/bliss-rs.git?rev=010a5dcb111242eda2113834fd2b288605dd1ce7#010a5dcb111242eda2113834fd2b288605dd1ce7"
 dependencies = [
  "adler32",
  "extended-isolation-forest",
@@ -469,11 +469,13 @@ dependencies = [
 
 [[package]]
 name = "bliss-mixer"
-version = "0.8.1"
+version = "0.11.4"
 dependencies = [
  "actix-web",
  "argparse",
  "bliss-audio",
+ "bliss-mixer-core",
+ "bliss-playlist-guidance-spi",
  "chrono",
  "env_logger",
  "extended-isolation-forest",
@@ -489,6 +491,28 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
+]
+
+[[package]]
+name = "bliss-mixer-core"
+version = "0.1.0"
+source = "git+https://github.com/chrober/bliss-mixer-core.git?rev=a605edc2b61b525bd75bb3d350fd4b41235cf5d6#a605edc2b61b525bd75bb3d350fd4b41235cf5d6"
+dependencies = [
+ "bliss-audio",
+ "globset",
+ "ndarray",
+ "rayon",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "bliss-playlist-guidance-spi"
+version = "0.1.0"
+source = "git+https://github.com/chrober/bliss-playlist-guidance-spi.git?rev=773b1a6#773b1a62cd2c405bcd3b708208caaa658f76e899"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

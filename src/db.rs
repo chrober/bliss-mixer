@@ -362,4 +362,134 @@ impl Db {
         log::debug!("Loaded {} raw metrics for full scan", results.len());
         results
     }
+
+    pub fn get_raw_metrics_by_artist(
+        &self,
+        artist: &str,
+    ) -> Vec<(u64, [f32; tree::DIMENSIONS])> {
+        let mut results: Vec<(u64, [f32; tree::DIMENSIONS])> = Vec::new();
+        match self.conn.prepare("SELECT Tempo, Zcr, MeanSpectralCentroid, StdDevSpectralCentroid, MeanSpectralRolloff, StdDevSpectralRolloff, MeanSpectralFlatness, StdDevSpectralFlatness, MeanLoudness, StdDevLoudness, Chroma1, Chroma2, Chroma3, Chroma4, Chroma5, Chroma6, Chroma7, Chroma8, Chroma9, Chroma10, Chroma11, Chroma12, Chroma13, rowid FROM TracksV2 WHERE Artist=:artist;") {
+            Ok(mut stmt) => {
+                let track_iter = stmt.query_map(&[(":artist", &artist)], |row| {
+                    Ok((
+                        row.get(0)?,  row.get(1)?,  row.get(2)?,  row.get(3)?,
+                        row.get(4)?,  row.get(5)?,  row.get(6)?,  row.get(7)?,
+                        row.get(8)?,  row.get(9)?,  row.get(10)?, row.get(11)?,
+                        row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?,
+                        row.get(16)?, row.get(17)?, row.get(18)?, row.get(19)?,
+                        row.get(20)?, row.get(21)?, row.get(22)?, row.get::<_, u64>(23)?,
+                    ))
+                }).unwrap();
+                for tr in track_iter {
+                    let t = tr.unwrap();
+                    let metrics: [f32; tree::DIMENSIONS] = [
+                        t.0,  t.1,  t.2,  t.3,  t.4,  t.5,  t.6,  t.7,
+                        t.8,  t.9,  t.10, t.11, t.12, t.13, t.14, t.15,
+                        t.16, t.17, t.18, t.19, t.20, t.21, t.22,
+                    ];
+                    results.push((t.23, metrics));
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to load raw metrics for artist '{}': {}", artist, e);
+            }
+        }
+        log::debug!(
+            "Loaded {} raw metrics for artist '{}'",
+            results.len(),
+            artist
+        );
+        results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_db() -> Db {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE TracksV2 (
+                File TEXT, Title TEXT, Artist TEXT, AlbumArtist TEXT, Album TEXT,
+                Genre TEXT, Duration INTEGER,
+                Tempo REAL, Zcr REAL, MeanSpectralCentroid REAL,
+                StdDevSpectralCentroid REAL, MeanSpectralRolloff REAL,
+                StdDevSpectralRolloff REAL, MeanSpectralFlatness REAL,
+                StdDevSpectralFlatness REAL, MeanLoudness REAL,
+                StdDevLoudness REAL, Chroma1 REAL, Chroma2 REAL, Chroma3 REAL,
+                Chroma4 REAL, Chroma5 REAL, Chroma6 REAL, Chroma7 REAL,
+                Chroma8 REAL, Chroma9 REAL, Chroma10 REAL, Chroma11 REAL,
+                Chroma12 REAL, Chroma13 REAL, Ignore INTEGER
+            );
+            INSERT INTO TracksV2 VALUES (
+                'fixture.flac', 'Fixture title', 'Fixture artist',
+                'Fixture album artist', 'Fixture album', 'Rock; Electronic', 181,
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                18, 19, 20, 21, 22, 23, 0
+            );
+            INSERT INTO TracksV2 VALUES (
+                'ignored.flac', 'Ignored', 'Ignored artist', 'Ignored artist',
+                'Ignored album', 'Ignored', 182,
+                101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112,
+                113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 1
+            );
+            "#,
+        )
+        .unwrap();
+        Db { conn }
+    }
+
+    #[test]
+    fn raw_metrics_follow_the_canonical_twenty_three_column_order() {
+        let db = fixture_db();
+        let metrics = db.get_raw_metrics(1).unwrap();
+        for (index, value) in metrics.iter().enumerate() {
+            assert_eq!(*value, (index + 1) as f32);
+        }
+    }
+
+    #[test]
+    fn metadata_and_row_identity_match_tracksv2() {
+        let db = fixture_db();
+        assert_eq!(db.get_rowid("fixture.flac"), 1);
+        assert_eq!(db.get_rowid("missing.flac"), 0);
+        let metadata = db.get_metadata(1).unwrap();
+        assert_eq!(metadata.file, "fixture.flac");
+        assert_eq!(metadata.title.as_deref(), Some("Fixture title"));
+        assert_eq!(metadata.artist.as_deref(), Some("Fixture artist"));
+        assert_eq!(metadata.album_artist.as_deref(), Some("Fixture album artist"));
+        assert_eq!(metadata.album.as_deref(), Some("Fixture album"));
+        assert_eq!(metadata.genre.as_deref(), Some("Rock; Electronic"));
+        assert_eq!(metadata.duration, Some(181));
+        assert_eq!(metadata.tempo, Some(1.0));
+    }
+
+    #[test]
+    fn full_scans_and_genres_exclude_ignored_rows() {
+        let db = fixture_db();
+        let metrics = db.get_all_raw_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].0, 1);
+        let genres = db.get_all_genres();
+        assert_eq!(genres.len(), 2);
+        assert!(genres.contains("Rock"));
+        assert!(genres.contains("Electronic"));
+    }
+
+    #[test]
+    fn artist_raw_scan_uses_exact_artist_and_preserves_list_semantics() {
+        let db = fixture_db();
+        let fixture = db.get_raw_metrics_by_artist("Fixture artist");
+        assert_eq!(fixture.len(), 1);
+        assert_eq!(fixture[0].0, 1);
+        assert_eq!(fixture[0].1[0], 1.0);
+
+        let ignored = db.get_raw_metrics_by_artist("Ignored artist");
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].0, 2);
+        assert_eq!(ignored[0].1[0], 101.0);
+        assert!(db.get_raw_metrics_by_artist("fixture artist").is_empty());
+    }
 }
