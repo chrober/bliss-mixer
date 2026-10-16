@@ -82,6 +82,7 @@ jobs:
           if grep -q 'bullseye' docker/Dockerfile_x86; then
             echo "Dockerfile_x86 still contains Bullseye references" >&2
             exit 1
+          fi
       - name: Build x86_64 musl binary
         run: |
           set -euo pipefail
@@ -115,6 +116,7 @@ jobs:
           if grep -q 'bullseye' docker/Dockerfile_arm; then
             echo "Dockerfile_arm still contains Bullseye references" >&2
             exit 1
+          fi
       - name: Build ARM binaries
         run: |
           set -euo pipefail
