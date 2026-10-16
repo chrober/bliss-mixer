@@ -22,6 +22,8 @@ response is a new-line separated list of tracks.
 | forest      | Bool (1/0)                | Use `extended isolation forest` when 4 (or more) seed tracks. | `0`             |
 | norepart    | Int                       | Don't repeat an artist for N tracks.                          | `0`             |
 | norepalb    | Int                       | Don't repeat an album for N tracks.                           | `0`             |
+| artist_identity_snapshot | String       | Read-only `lyrion-track-identities-v1` SQLite snapshot used by artist repeat filtering. | _(none)_ |
+| artist_repeat_mode | String             | Artist identity policy: `shared_artist`, `primary_artist`, or `exact_bliss_credit`. | `exact_bliss_credit` |
 | genregroups | Array of array of strings | List of genre groups, used when filtering on genre.            | _(mandatory)_   |
 | allgenres   | Bool (1/0)                | When checking if a track is in a genre group, should group contain all of track's genres or any of track's genres. | `0`           |
 | adaptiveweights | Bool (1/0)            | Use adaptive weighting instead of static weights. Requires 2+ seed tracks. | `0` |
@@ -37,6 +39,8 @@ Notes:
 * With `adaptiveweights`, the mixer computes a variance-based weight matrix from the seed tracks' features, then scores all tracks in the database using Mahalanobis distance. Features with low variance across seeds get higher weight (i.e. the mix preserves what the seeds have in common). When a learned matrix is also loaded (via `--matrix` CLI flag), the two matrices are blended: `M = (learnedblend/100) * M_learned + (1 - learnedblend/100) * M_variance`. Single-seed requests use the learned matrix alone. Falls back to the standard algorithm if fewer than 2 seeds are provided and no learned matrix is available.
 * When `debug=1` and `adaptiveweights=1`, the response includes an `X-Bliss-Debug` HTTP header containing a JSON object with per-feature weights, filter statistics, and timing information.
 * `norepart` and `norepalb` require `previous` list of tracks to be supplied.
+* When `artist_identity_snapshot` is valid, `norepart` compares stable MusicBrainz artist IDs first, then snapshot-local Lyrion contributor IDs, then normalized artist names. Missing track rows fall back conservatively to their complete Bliss artist credit.
+* `shared_artist` treats any overlapping credited track artist as a repeat. `primary_artist` compares only the primary credited artist. `exact_bliss_credit` retains the legacy complete-credit comparison. An absent or invalid snapshot falls back to that legacy identity data without failing the mix.
 * Set `maxbmpdiff` to 0 (or omit the field) to disable BPM difference checking.
 * Set `min` or `max` to 0 (or omit the fields) to disable filtering on track duration.
 
@@ -55,6 +59,8 @@ Example request:
     "shuffle": 1,
     "norepart": 10,
     "norepalb": 10,
+    "artist_identity_snapshot": "/cache/artist-repeat-identities.sqlite",
+    "artist_repeat_mode": "shared_artist",
     "adaptiveweights": 0,
     "learnedblend": 50,
     "debug": 0,

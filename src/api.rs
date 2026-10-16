@@ -13,6 +13,9 @@ use crate::tree;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use bliss_audio::AnalysisIndex;
 use bliss_audio::playlist::mahalanobis_distance;
+use bliss_mixer_core::repeat_identity::{
+    artist_repeat_matches, ArtistIdentitySet, ArtistRepeatMode, TrackIdentitySnapshot,
+};
 use chrono::Datelike;
 use globset::Glob;
 use ndarray::{Array1, Array2};
@@ -22,7 +25,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
 use strum::IntoEnumIterator;
 use serde_json::json;
 use bliss_playlist_guidance_spi::{GuidanceHostRequestV1, GuidanceHostResponseV1};
@@ -98,6 +102,8 @@ pub struct MixParams {
     learnedblend: Option<u16>,
     debug: Option<u16>,
     json: Option<u16>,
+    artist_identity_snapshot: Option<String>,
+    artist_repeat_mode: Option<ArtistRepeatMode>,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +132,7 @@ struct Track {
     // Original artist, so that can use for api/list
     orig_artist: String,
     artist: String,
+    artist_identity: ArtistIdentitySet,
     album_artist: String,
     album: String,
     genres: HashSet<String>,
@@ -134,6 +141,16 @@ struct Track {
     is_various: bool,
     bpm: i16
 }
+
+#[derive(Clone)]
+struct ArtistIdentityCacheEntry {
+    path: String,
+    len: u64,
+    modified: Option<SystemTime>,
+    snapshot: Option<Arc<TrackIdentitySnapshot>>,
+}
+
+static ARTIST_IDENTITY_CACHE: OnceLock<Mutex<Option<ArtistIdentityCacheEntry>>> = OnceLock::new();
 
 #[derive(Clone)]
 #[derive(Serialize)]
@@ -154,6 +171,7 @@ fn get_track_from_id(db: &db::Db, id: u64) -> Track {
         file: String::new(),
         title: String::new(),
         artist: String::new(),
+        artist_identity: ArtistIdentitySet::default(),
         orig_artist: String::new(),
         album_artist: String::new(),
         album: String::new(),
@@ -172,6 +190,7 @@ fn get_track_from_id(db: &db::Db, id: u64) -> Track {
             info.title = m.title.unwrap_or_default().to_lowercase();
             info.orig_artist = m.artist.unwrap_or_default();
             info.artist = info.orig_artist.to_lowercase();
+            info.artist_identity = ArtistIdentitySet::legacy(&info.orig_artist);
             info.album_artist = m.album_artist.unwrap_or_default().to_lowercase();
             if info.album_artist.is_empty() {
                 info.album = m.album.unwrap_or_default().to_lowercase() + "::" + &info.artist;
@@ -205,6 +224,7 @@ fn get_track(db: &db::Db, track: &str) -> Track {
         file: String::new(),
         title: String::new(),
         artist: String::new(),
+        artist_identity: ArtistIdentitySet::default(),
         orig_artist: String::new(),
         album_artist: String::new(),
         album: String::new(),
@@ -225,6 +245,101 @@ fn get_track(db: &db::Db, track: &str) -> Track {
         log::error!("Track '{}' not found in DB", track);
     }
     info
+}
+
+fn load_artist_identity_snapshot(path: Option<&str>) -> Option<Arc<TrackIdentitySnapshot>> {
+    let path = path.map(str::trim).filter(|value| !value.is_empty())?;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            log::warn!(
+                "Could not inspect artist identity snapshot '{}': {}",
+                path,
+                error
+            );
+            return None;
+        }
+    };
+    let len = metadata.len();
+    let modified = metadata.modified().ok();
+    let cache = ARTIST_IDENTITY_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.as_ref() {
+            if entry.path == path && entry.len == len && entry.modified == modified {
+                return entry.snapshot.clone();
+            }
+        }
+    }
+
+    let snapshot = match TrackIdentitySnapshot::open_read_only(path) {
+        Ok(snapshot) => {
+            log::debug!("Loaded {} track identities from '{}'", snapshot.len(), path);
+            Some(Arc::new(snapshot))
+        }
+        Err(error) => {
+            log::warn!(
+                "Could not load artist identity snapshot '{}': {}",
+                path,
+                error
+            );
+            None
+        }
+    };
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(ArtistIdentityCacheEntry {
+        path: path.to_owned(),
+        len,
+        modified,
+        snapshot: snapshot.clone(),
+    });
+    snapshot
+}
+
+fn get_track_from_id_with_snapshot(
+    db: &db::Db,
+    id: u64,
+    snapshot: Option<&TrackIdentitySnapshot>,
+) -> Track {
+    let mut track = get_track_from_id(db, id);
+    if track.found {
+        if let Some(identity) = snapshot.and_then(|snapshot| snapshot.get(&track.file)) {
+            track.artist_identity = identity.clone().with_legacy_credit(&track.orig_artist);
+        }
+    }
+    track
+}
+
+fn get_track_with_snapshot(
+    db: &db::Db,
+    file: &str,
+    snapshot: Option<&TrackIdentitySnapshot>,
+) -> Track {
+    let id = db.get_rowid(file);
+    if id > 0 {
+        let track = get_track_from_id_with_snapshot(db, id, snapshot);
+        if !track.found {
+            log::warn!("Could not find '{}' in DB", file);
+        }
+        track
+    } else {
+        log::error!("Track '{}' not found in DB", file);
+        get_track(db, file)
+    }
+}
+
+fn artist_is_filtered(
+    candidate: &ArtistIdentitySet,
+    blocked: &[ArtistIdentitySet],
+    mode: ArtistRepeatMode,
+) -> bool {
+    blocked
+        .iter()
+        .any(|identity| artist_repeat_matches(candidate, identity, mode))
 }
 
 fn get_genres(genregroups: &Vec<HashSet<String>>, track_genres: &HashSet<String>, allgenres:u16) -> HashSet<String> {
@@ -356,6 +471,9 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     let shuffle = payload.shuffle.unwrap_or(0);
     let norepart = payload.norepart.unwrap_or(0);
     let norepalb = payload.norepalb.unwrap_or(0);
+    let artist_repeat_mode = payload.artist_repeat_mode.unwrap_or_default();
+    let artist_identity_snapshot =
+        load_artist_identity_snapshot(payload.artist_identity_snapshot.as_deref());
     let genregroups = expand_globbed_genres(&payload.genregroups, &all_db_genres);
     let allgenres = payload.allgenres.unwrap_or(0);
     let mut useforest = payload.forest.unwrap_or(0);
@@ -366,7 +484,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     // Tracks filtered out due to title matching seed or chosen track
     let mut filter_out_titles: HashSet<String> = HashSet::new();
     // Tracks filtered out due to artist matching seed or chosen track
-    let mut filter_out_artists: HashSet<String> = HashSet::new();
+    let mut filter_out_artists: Vec<ArtistIdentitySet> = Vec::new();
     // Tracks filtered out due to album matching seed or chosen track
     let mut filter_out_albums: HashSet<String> = HashSet::new();
     // IDs of seeds, previous, and chosen tracks - to prevent duplicates
@@ -401,7 +519,8 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     if let Some(previous) = &payload.previous {
         let mut pcount = 0;
         for track in previous {
-            let trk: Track = get_track(&db, track);
+            let trk: Track =
+                get_track_with_snapshot(&db, track, artist_identity_snapshot.as_deref());
             if !trk.found {
                 continue;
             }
@@ -410,7 +529,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 filter_out_titles.insert(trk.title);
             }
             if pcount < norepart && !trk.artist.is_empty() {
-                filter_out_artists.insert(trk.artist);
+                filter_out_artists.push(trk.artist_identity);
             }
             if pcount < norepalb && !trk.album.is_empty() {
                 filter_out_albums.insert(trk.album);
@@ -428,7 +547,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
 
     // Find seeds in DB
     for track in &payload.tracks {
-        let trk: Track = get_track(&db, track);
+        let trk: Track = get_track_with_snapshot(&db, track, artist_identity_snapshot.as_deref());
         if !trk.found {
             continue;
         }
@@ -567,7 +686,8 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             };
             for (cid, dist) in scored {
                 filter_out_ids.insert(cid);
-                let mut trk: Track = get_track_from_id(&db, cid);
+                let mut trk: Track =
+                    get_track_from_id_with_snapshot(&db, cid, artist_identity_snapshot.as_deref());
                 trk.sim = dist;
                 if let Some(reason) = discard_reason(
                     &trk,
@@ -590,7 +710,13 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     file: trk.file.clone(),
                     sim: trk.sim,
                 };
-                if norepart > 0 && filter_out_artists.contains(&trk.artist) {
+                if norepart > 0
+                    && artist_is_filtered(
+                        &trk.artist_identity,
+                        &filter_out_artists,
+                        artist_repeat_mode,
+                    )
+                {
                     log("FILTER(artist)", &trk);
                     stats.filtered_artist += 1;
 
@@ -624,7 +750,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 stats.usable += 1;
                 filter_out_titles.insert(trk.title.clone());
                 if norepart > 0 {
-                    filter_out_artists.insert(trk.artist.clone());
+                    filter_out_artists.push(trk.artist_identity.clone());
                 }
                 if norepalb > 0 {
                     filter_out_albums.insert(trk.album.clone());
@@ -709,7 +835,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 continue;
             }
             filter_out_ids.insert(track.id);
-            let trk: Track = get_track_from_id(&db, track.id);
+            let trk: Track = get_track_from_id_with_snapshot(
+                &db,
+                track.id,
+                artist_identity_snapshot.as_deref(),
+            );
             if let Some(reason) = discard_reason(
                 &trk,
                 min,
@@ -730,7 +860,13 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 file: trk.file.clone(),
                 sim: 1.0,
             };
-            if norepart > 0 && filter_out_artists.contains(&trk.artist) {
+            if norepart > 0
+                && artist_is_filtered(
+                    &trk.artist_identity,
+                    &filter_out_artists,
+                    artist_repeat_mode,
+                )
+            {
                 log("FILTER(artist)", &trk);
                 filtered.push(track_file);
                 continue;
@@ -748,7 +884,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             log("USABLE", &trk);
             filter_out_titles.insert(trk.title.clone());
             if norepart > 0 {
-                filter_out_artists.insert(trk.artist.clone());
+                filter_out_artists.push(trk.artist_identity.clone());
             }
             if norepalb > 0 {
                 filter_out_albums.insert(trk.album.clone());
@@ -799,7 +935,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                         }
                     } else {
                         filter_out_ids.insert(sim_track.id);
-                        let mut trk: Track = get_track_from_id(&db, sim_track.id);
+                        let mut trk: Track = get_track_from_id_with_snapshot(
+                            &db,
+                            sim_track.id,
+                            artist_identity_snapshot.as_deref(),
+                        );
                         trk.sim = sim_track.sim;
                         if let Some(reason) = discard_reason(
                             &trk,
@@ -821,7 +961,13 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                             file: trk.file.clone(),
                             sim: trk.sim,
                         };
-                        if norepart > 0 && filter_out_artists.contains(&trk.artist) {
+                        if norepart > 0
+                            && artist_is_filtered(
+                                &trk.artist_identity,
+                                &filter_out_artists,
+                                artist_repeat_mode,
+                            )
+                        {
                             log("FILTER(artist)", &trk);
 
                             if shuffle == 1 {
@@ -854,7 +1000,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                         log("USABLE", &trk);
                         filter_out_titles.insert(trk.title.clone());
                         if norepart > 0 {
-                            filter_out_artists.insert(trk.artist.clone());
+                            filter_out_artists.push(trk.artist_identity.clone());
                         }
                         if norepalb > 0 {
                             filter_out_albums.insert(trk.album.clone());
@@ -1192,5 +1338,91 @@ mod list_tests {
         assert_eq!(similarities[0].id, 3);
         assert_eq!(similarities[1].id, 2);
         assert!(similarities[0].sim < similarities[1].sim);
+    }
+
+    #[test]
+    fn mix_payload_accepts_repeat_identity_controls() {
+        let payload: MixParams = serde_json::from_value(serde_json::json!({
+            "tracks": ["queen.flac"],
+            "genregroups": [],
+            "artist_identity_snapshot": "/cache/identities.sqlite",
+            "artist_repeat_mode": "shared_artist"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            payload.artist_identity_snapshot.as_deref(),
+            Some("/cache/identities.sqlite")
+        );
+        assert_eq!(
+            payload.artist_repeat_mode,
+            Some(bliss_mixer_core::repeat_identity::ArtistRepeatMode::SharedArtist)
+        );
+    }
+
+    #[test]
+    fn shared_artist_filter_blocks_different_credits_with_one_mbid() {
+        use bliss_mixer_core::repeat_identity::{ArtistIdentitySet, ArtistRepeatMode};
+
+        let previous = ArtistIdentitySet {
+            shared_keys: vec!["artist-mbid:queen".into(), "artist-mbid:bowie".into()],
+            primary_key: Some("artist-mbid:queen".into()),
+            legacy_credit: "queen & david bowie".into(),
+        };
+        let candidate = ArtistIdentitySet {
+            shared_keys: vec!["artist-mbid:queen".into()],
+            primary_key: Some("artist-mbid:queen".into()),
+            legacy_credit: "queen".into(),
+        };
+
+        assert!(artist_is_filtered(
+            &candidate,
+            std::slice::from_ref(&previous),
+            ArtistRepeatMode::SharedArtist,
+        ));
+        assert!(artist_is_filtered(
+            &candidate,
+            std::slice::from_ref(&previous),
+            ArtistRepeatMode::PrimaryArtist,
+        ));
+        assert!(!artist_is_filtered(
+            &candidate,
+            &[previous],
+            ArtistRepeatMode::ExactBlissCredit,
+        ));
+
+        let first_selected = ArtistIdentitySet {
+            shared_keys: vec!["artist-mbid:queen".into()],
+            primary_key: Some("artist-mbid:queen".into()),
+            legacy_credit: "queen".into(),
+        };
+        let later_candidate = ArtistIdentitySet {
+            shared_keys: vec!["artist-mbid:queen".into()],
+            primary_key: Some("artist-mbid:queen".into()),
+            legacy_credit: "queen live".into(),
+        };
+        let mut selected_batch = Vec::new();
+        assert!(!artist_is_filtered(
+            &first_selected,
+            &selected_batch,
+            ArtistRepeatMode::SharedArtist,
+        ));
+        selected_batch.push(first_selected);
+        assert!(artist_is_filtered(
+            &later_candidate,
+            &selected_batch,
+            ArtistRepeatMode::SharedArtist,
+        ));
+    }
+
+    #[test]
+    fn invalid_artist_identity_snapshot_falls_back_to_legacy_filtering() {
+        let path = std::env::temp_dir().join(format!(
+            "bliss-mixer-invalid-identities-{}.sqlite",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not a SQLite snapshot").unwrap();
+        assert!(load_artist_identity_snapshot(path.to_str()).is_none());
+        let _ = std::fs::remove_file(path);
     }
 }
