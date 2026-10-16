@@ -496,14 +496,16 @@ dependencies = [
 [[package]]
 name = "bliss-mixer-core"
 version = "0.1.0"
-source = "git+https://github.com/chrober/bliss-mixer-core.git?rev=a605edc2b61b525bd75bb3d350fd4b41235cf5d6#a605edc2b61b525bd75bb3d350fd4b41235cf5d6"
+source = "git+https://github.com/chrober/bliss-mixer-core.git?rev=1aa5bbb#1aa5bbbdeb5a96e5e28de0686c8ffeeecd6d34ba"
 dependencies = [
  "bliss-audio",
  "globset",
  "ndarray",
  "rayon",
  "rusqlite",
+ "serde",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
