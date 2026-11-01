@@ -66,6 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --locked
       - run: python tests/test_source_archive.py
+      - run: python tests/test_license_bundle.py
 
   linux-x86:
     needs: test
@@ -197,11 +198,13 @@ jobs:
           set -euo pipefail
           mkdir -p source-assets
           python scripts/build_source_archive.py --repo . --commit "$GITHUB_SHA" --output source-assets/bliss-mixer-source.tar.gz
+          python scripts/build_license_bundle.py source-assets/bliss-mixer-source.tar.gz source-assets/bliss-mixer-third-party-licenses.zip
           cp third-party-licenses/alloc-stdlib-0.2.2-LICENSE source-assets/bliss-mixer-third-party-alloc-stdlib-LICENSE
           cp third-party-licenses/convert_case-0.4.0-LICENSE source-assets/bliss-mixer-third-party-convert_case-LICENSE
           cp third-party-licenses/winapi-legacy-LICENSE source-assets/bliss-mixer-third-party-winapi-legacy-LICENSE
           cp third-party-licenses/fxhash-0.2.1-LICENSE source-assets/bliss-mixer-third-party-fxhash-LICENSE
           (cd source-assets && sha256sum bliss-mixer-source.tar.gz > bliss-mixer-source.tar.gz.sha256)
+          (cd source-assets && sha256sum bliss-mixer-third-party-licenses.zip > bliss-mixer-third-party-licenses.zip.sha256)
           (cd source-assets && for file in bliss-mixer-third-party-*-LICENSE; do sha256sum "$file" > "$file.sha256"; done)
       - uses: actions/upload-artifact@v7
         with:
