@@ -1,5 +1,5 @@
-Applies to kernel32-sys 0.2.2 and ws2_32-sys 0.2.1. Their source headers
-identify the same copyright holder, year and license.
+Applies to kernel32-sys 0.2.2, ws2_32-sys 0.2.1 and winapi-build 0.1.1.
+Their source headers identify the same copyright holder, year and license.
 Source: https://github.com/retep998/winapi-rs/blob/0d92b96a117f263d59d3121eafbc8a7051c3c49e/LICENSE.md
 
 The MIT License (MIT)
