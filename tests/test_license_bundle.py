@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -19,6 +20,25 @@ def add_file(tar, name, data):
 
 
 class LicenseBundleTests(unittest.TestCase):
+    def test_fuchsia_sys_supplement_includes_related_parent_crate_license(self):
+        path = SCRIPT.parents[1] / 'third-party-licenses/fuchsia-zircon-sys-0.3.3-LICENSE'
+        text = path.read_text(encoding='utf-8')
+        self.assertIn('fuchsia-zircon 0.3.3', text)
+        start = text.index('// Copyright 2016 The Fuchsia Authors.')
+        end = text.index('\n\nThe following license', start)
+        upstream = text[start:end] + '\n'
+        self.assertEqual(hashlib.sha256(upstream.encode('utf-8')).hexdigest(),
+                         'f82f9062a6dff28145c185f90f94c485ee bdc2bb4c6f1c840513709e6d228453'.replace(' ', ''))
+
+    def test_actix_macros_upstream_mit_supplement_is_present(self):
+        path = SCRIPT.parents[1] / 'third-party-licenses/actix-macros-0.1.3-LICENSE-MIT'
+        self.assertTrue(path.is_file(), 'actix-macros upstream notice is missing')
+        text = path.read_text(encoding='utf-8')
+        self.assertIn('ab496a71b576b29a9fd07064c11eda55428fb552', text)
+        upstream = text[text.index('Copyright (c) 2017'):]
+        self.assertEqual(hashlib.sha256(upstream.encode('utf-8')).hexdigest(),
+                         '48c3e116e98d2507222ddf53c72f2d4cd6dae3798ca665446e0014540b6e7d27')
+
     def test_copies_inventory_vendor_notices_and_supplements(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
