@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "bliss-mixer"
-version = "0.11.8"
+version = "0.11.7"
 dependencies = [
  "actix-web",
  "argparse",
