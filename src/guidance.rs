@@ -16,6 +16,10 @@ const LOG_EVENT_VERSION: &str = "guidance_log_event_v1";
 const MAX_LOG_EVENTS: usize = 64;
 const MAX_LOG_EVENT_BYTES: usize = 16 * 1024;
 
+pub fn capabilities() -> Value {
+    serde_json::json!({ "bounded_signal_families_v1": true })
+}
+
 pub fn score(request: GuidanceHostRequestV1) -> GuidanceHostResponseV1 {
     match run_provider_session(&request) {
         Ok((signals, diagnostics)) => GuidanceHostResponseV1 {
@@ -258,6 +262,17 @@ pub fn selection_trace(
             .or_default()
             .push(signal);
     }
+    let mut family_weights = BTreeMap::<(&str, &str), f64>::new();
+    for signal in signals {
+        if signal.confidence <= 0.0 {
+            continue;
+        }
+        if let Some(family) = signal_family(signal) {
+            *family_weights
+                .entry((&signal.candidate_id, family))
+                .or_default() += influence(&request.policy, signal).abs();
+        }
+    }
     let candidates = request
         .candidates
         .iter()
@@ -272,7 +287,14 @@ pub fn selection_trace(
                     channel: signal.channel.clone(),
                     score: signal.score.clamp(-1.0, 1.0),
                     confidence: signal.confidence.clamp(0.0, 1.0),
-                    contribution: contribution(&request.policy, signal),
+                    contribution: contribution(&request.policy, signal)
+                        / signal_family(signal)
+                            .and_then(|family| {
+                                family_weights.get(&(signal.candidate_id.as_str(), family))
+                            })
+                            .copied()
+                            .unwrap_or(1.0)
+                            .max(1.0),
                     observation: signal.observation.clone(),
                 })
                 .collect(),
@@ -292,18 +314,39 @@ pub fn selection_trace(
 }
 
 fn contribution(policy: &Value, signal: &GuidanceSignal) -> f64 {
-    let key = match signal.channel.as_str() {
-        "playcount" => "playcount_influence",
-        "last_played" => "last_played_influence",
-        "library_age" => "library_age_influence",
-        _ => return 0.0,
-    };
+    influence(policy, signal) * signal.score.clamp(-1.0, 1.0) * signal.confidence.clamp(0.0, 1.0)
+}
+
+fn influence(policy: &Value, signal: &GuidanceSignal) -> f64 {
+    if !signal
+        .channel
+        .bytes()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_')
+    {
+        return 0.0;
+    }
+    let key = format!("{}_influence", signal.channel);
     let influence = policy
-        .get(key)
+        .get(&key)
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
         .clamp(-100.0, 100.0);
-    (influence / 100.0) * signal.score.clamp(-1.0, 1.0) * signal.confidence.clamp(0.0, 1.0)
+    influence / 100.0
+}
+
+fn signal_family(signal: &GuidanceSignal) -> Option<&str> {
+    signal
+        .observation
+        .as_ref()?
+        .get("guidance_family_v1")?
+        .as_str()
+        .filter(|family| {
+            !family.is_empty()
+                && family.len() <= 64
+                && family
+                    .bytes()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_')
+        })
 }
 
 #[cfg(test)]
@@ -314,6 +357,11 @@ mod tests {
         GuidanceSignal, ScoreContext,
     };
     use serde_json::json;
+
+    #[test]
+    fn capability_metadata_identifies_bounded_signal_family_support() {
+        assert_eq!(super::capabilities()["bounded_signal_families_v1"], true);
+    }
 
     #[cfg(windows)]
     fn fixture_provider_command() -> (String, Vec<String>) {
@@ -410,6 +458,33 @@ mod tests {
         );
         assert!((trace.candidates[0].guidance[0].contribution - 0.4).abs() < 1e-12);
         assert!(trace.candidates[0].final_score.is_none());
+
+        let mut family_request = request.clone();
+        family_request.policy = json!({ "playcount_influence": -80, "album_playcount_influence": -80, "artist_playcount_influence": -80 });
+        let family_signals: Vec<GuidanceSignal> =
+            ["playcount", "album_playcount", "artist_playcount"]
+                .iter()
+                .map(|channel| GuidanceSignal {
+                    candidate_id: "file:///music/example.flac".into(),
+                    channel: (*channel).into(),
+                    scope: GuidanceScope::Global,
+                    score: -1.0,
+                    confidence: 1.0,
+                    rationale: None,
+                    observed_at: None,
+                    observation: Some(json!({"guidance_family_v1":"listening_playcount"})),
+                })
+                .collect();
+        let family_trace = selection_trace(&family_request, &family_signals);
+        let combined: f64 = family_trace.candidates[0]
+            .guidance
+            .iter()
+            .map(|item| item.contribution)
+            .sum();
+        assert!(
+            (combined - 1.0).abs() < 1e-12,
+            "related signals must contribute one bounded family score"
+        );
     }
 
     #[test]

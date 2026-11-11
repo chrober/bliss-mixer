@@ -5,17 +5,17 @@
  * GPLv3 license.
  *
  **/
-
 use crate::db;
 use crate::forest;
 use crate::guidance;
 use crate::tree;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
-use bliss_audio::AnalysisIndex;
 use bliss_audio::playlist::mahalanobis_distance;
+use bliss_audio::AnalysisIndex;
 use bliss_mixer_core::repeat_identity::{
     artist_repeat_matches, ArtistIdentitySet, ArtistRepeatMode, TrackIdentitySnapshot,
 };
+use bliss_playlist_guidance_spi::{GuidanceHostRequestV1, GuidanceHostResponseV1};
 use chrono::Datelike;
 use globset::Glob;
 use ndarray::{Array1, Array2};
@@ -23,13 +23,12 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 use strum::IntoEnumIterator;
-use serde_json::json;
-use bliss_playlist_guidance_spi::{GuidanceHostRequestV1, GuidanceHostResponseV1};
 
 const CHRISTMAS: &str = "christmas";
 const VARIOUS: &str = "various";
@@ -139,7 +138,7 @@ struct Track {
     duration: u32,
     sim: f32,
     is_various: bool,
-    bpm: i16
+    bpm: i16,
 }
 
 #[derive(Clone)]
@@ -152,8 +151,7 @@ struct ArtistIdentityCacheEntry {
 
 static ARTIST_IDENTITY_CACHE: OnceLock<Mutex<Option<ArtistIdentityCacheEntry>>> = OnceLock::new();
 
-#[derive(Clone)]
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TrackFile {
     file: String,
     sim: f32,
@@ -208,7 +206,7 @@ fn get_track_from_id(db: &db::Db, id: u64) -> Track {
                 }
             }
             info.duration = m.duration.unwrap_or(0);
-            info.bpm = (((m.tempo.unwrap_or(0.0)+1.0)*206.0)/2.0) as i16;
+            info.bpm = (((m.tempo.unwrap_or(0.0) + 1.0) * 206.0) / 2.0) as i16;
         }
         Err(e) => {
             log::error!("Failed to read metadata. {}", e);
@@ -232,7 +230,7 @@ fn get_track(db: &db::Db, track: &str) -> Track {
         duration: 0,
         sim: 0.,
         is_various: false,
-        bpm: 0
+        bpm: 0,
     };
 
     let id = db.get_rowid(track);
@@ -342,11 +340,17 @@ fn artist_is_filtered(
         .any(|identity| artist_repeat_matches(candidate, identity, mode))
 }
 
-fn get_genres(genregroups: &Vec<HashSet<String>>, track_genres: &HashSet<String>, allgenres:u16) -> HashSet<String> {
+fn get_genres(
+    genregroups: &Vec<HashSet<String>>,
+    track_genres: &HashSet<String>,
+    allgenres: u16,
+) -> HashSet<String> {
     let mut genres: HashSet<String> = HashSet::new();
 
     for group in genregroups {
-        if (allgenres>0 && track_genres.is_subset(group)) || (allgenres==0 && track_genres.intersection(group).count()>0) {
+        if (allgenres > 0 && track_genres.is_subset(group))
+            || (allgenres == 0 && track_genres.intersection(group).count() > 0)
+        {
             for genre in group {
                 genres.insert(genre.to_string());
             }
@@ -355,7 +359,11 @@ fn get_genres(genregroups: &Vec<HashSet<String>>, track_genres: &HashSet<String>
     genres
 }
 
-fn filter_genre(track_genres: &HashSet<String>, acceptable_genres: &HashSet<String>, all_genres_from_groups: &HashSet<String>) -> bool {
+fn filter_genre(
+    track_genres: &HashSet<String>,
+    acceptable_genres: &HashSet<String>,
+    all_genres_from_groups: &HashSet<String>,
+) -> bool {
     let mut rv: bool = false;
     if track_genres.is_empty() {
         rv = false;
@@ -390,7 +398,10 @@ fn discard_reason(
 
     if maxbpmdiff > 0 && trk.bpm > 0 {
         if let Some((minbpm, maxbpm)) = bpm_range {
-            if minbpm > 0 && maxbpm > 0 && (trk.bpm < (minbpm - maxbpmdiff) || trk.bpm > (maxbpm + maxbpmdiff)) {
+            if minbpm > 0
+                && maxbpm > 0
+                && (trk.bpm < (minbpm - maxbpmdiff) || trk.bpm > (maxbpm + maxbpmdiff))
+            {
                 return Some("bpm");
             }
         } else if let Some(seed_bpm) = seed_bpm {
@@ -434,7 +445,10 @@ impl StatsDebug {
     }
 }
 
-fn expand_globbed_genres(genregroups: &Vec<Vec<String>>, all_db_genres: &HashSet<String>) -> Vec<HashSet<String>> {
+fn expand_globbed_genres(
+    genregroups: &Vec<Vec<String>>,
+    all_db_genres: &HashSet<String>,
+) -> Vec<HashSet<String>> {
     let mut expanded: Vec<HashSet<String>> = Vec::new();
 
     for group in genregroups {
@@ -454,7 +468,17 @@ fn expand_globbed_genres(genregroups: &Vec<Vec<String>>, all_db_genres: &HashSet
 }
 
 fn log(reason: &str, trk: &Track) {
-    log::debug!("{} File:{}, Title:{}, Album/Artist:{}, Dur:{}, Sim:{:.18}, Genres:{:?}, BPM:{}", reason, trk.file, trk.title, trk.album, trk.duration, trk.sim, trk.genres, trk.bpm);
+    log::debug!(
+        "{} File:{}, Title:{}, Album/Artist:{}, Dur:{}, Sim:{:.18}, Genres:{:?}, BPM:{}",
+        reason,
+        trk.file,
+        trk.title,
+        trk.album,
+        trk.duration,
+        trk.sim,
+        trk.genres,
+        trk.bpm
+    );
 }
 
 pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpResponse {
@@ -559,16 +583,25 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
         if !trk.title.is_empty() {
             filter_out_titles.insert(trk.title.clone());
         }
-        if trk.bpm>maxbpm {
+        if trk.bpm > maxbpm {
             maxbpm = trk.bpm
         }
-        if trk.bpm<minbpm {
+        if trk.bpm < minbpm {
             minbpm = trk.bpm
         }
         seeds.push(trk);
     }
 
-    log::debug!("filtergenre:{}, filterxmas:{}, min:{}, max:{}, shuffle:{}, norepart:{}, norepalb:{}", filtergenre, filterxmas, min, max, shuffle, norepart, norepalb);
+    log::debug!(
+        "filtergenre:{}, filterxmas:{}, min:{}, max:{}, shuffle:{}, norepart:{}, norepalb:{}",
+        filtergenre,
+        filterxmas,
+        min,
+        max,
+        shuffle,
+        norepart,
+        norepalb
+    );
 
     if filtergenre == 1 {
         log::debug!("Acceptable genres: {:?}", acceptable_genres);
@@ -588,7 +621,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     }
 
     let mut fseeds: Vec<forest::Track> = Vec::new();
-    if useforest>0 && useadaptiveweights==0 && seeds.len()>=MIN_FOR_FOREST {
+    if useforest > 0 && useadaptiveweights == 0 && seeds.len() >= MIN_FOR_FOREST {
         for seed in seeds.clone() {
             if let Ok(metrics) = db.get_metrics(seed.id) {
                 let track = forest::Track {
@@ -628,11 +661,15 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
 
             if wantdebug {
                 // Build debug info with the diagonal weights
-                let weights_summary: Vec<String> = AnalysisIndex::iter().enumerate()
+                let weights_summary: Vec<String> = AnalysisIndex::iter()
+                    .enumerate()
                     .filter(|&(i, _)| matrix[[i, i]] > 0.01)
                     .map(|(i, idx)| format!("{:?}={:.3}", idx, matrix[[i, i]]))
                     .collect();
-                log::debug!("Adaptive weights (non-trivial): {}", weights_summary.join(", "));
+                log::debug!(
+                    "Adaptive weights (non-trivial): {}",
+                    weights_summary.join(", ")
+                );
             }
 
             // Compute the mean of seed raw metrics (to use as the "ideal" point)
@@ -662,7 +699,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 .collect();
             let distance_calc_ms = t_dist.elapsed().as_millis() as u64;
             let scored_count = scored.len();
-            log::debug!("Distance calculation: {} tracks scored in {}ms", scored_count, distance_calc_ms);
+            log::debug!(
+                "Distance calculation: {} tracks scored in {}ms",
+                scored_count,
+                distance_calc_ms
+            );
 
             let t_sort = Instant::now();
             scored.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -723,7 +764,10 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     if shuffle == 1 {
                         match matched_artists.get_mut(&trk.artist) {
                             Some(artist) => {
-                                if artist.tracks.len() < MAX_ARTIST_TRACKS && (dist - artist.tracks[0].sim).abs() < MAX_ARTIST_TRACK_SIM_DIFF {
+                                if artist.tracks.len() < MAX_ARTIST_TRACKS
+                                    && (dist - artist.tracks[0].sim).abs()
+                                        < MAX_ARTIST_TRACK_SIM_DIFF
+                                {
                                     artist.tracks.push(track_file.clone())
                                 }
                             }
@@ -767,17 +811,22 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     matched_artists.insert(trk.artist.clone(), matched_artist);
                 }
 
-                if chosen.len()>=similarity_count {
+                if chosen.len() >= similarity_count {
                     break;
                 }
             }
             let filter_ms = t_filter.elapsed().as_millis() as u64;
             let total_ms = t_total.elapsed().as_millis() as u64;
-            log::debug!("Filter+select: {}ms, Total adaptive weights: {}ms", filter_ms, total_ms);
+            log::debug!(
+                "Filter+select: {}ms, Total adaptive weights: {}ms",
+                filter_ms,
+                total_ms
+            );
 
             // Store debug info only if requested
             if wantdebug {
-                let feature_weights: Vec<FeatureWeight> = AnalysisIndex::iter().enumerate()
+                let feature_weights: Vec<FeatureWeight> = AnalysisIndex::iter()
+                    .enumerate()
                     .map(|(i, idx)| FeatureWeight {
                         feature: format!("{:?}", idx),
                         weight: matrix[[i, i]],
@@ -786,7 +835,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                 debug_info = Some(AdaptiveWeightsDebug {
                     algorithm: algorithm_name.clone(),
                     num_seeds: seed_raw_metrics.len(),
-                    blend_ratio: if algorithm_name.starts_with("blended") { Some(learnedblend) } else { None },
+                    blend_ratio: if algorithm_name.starts_with("blended") {
+                        Some(learnedblend)
+                    } else {
+                        None
+                    },
                     weights: feature_weights,
                     stats,
                     timing_ms: TimingDebug {
@@ -808,244 +861,263 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
 
     // Only run forest/standard if adaptive weighting didn't produce results
     if chosen.is_empty() {
-    if fseeds.len()>=MIN_FOR_FOREST {
-        log::debug!("Using extended isolation forest algorithm");
-        let mut forest:tree::AnalysisDetails = tree::AnalysisDetails::new();
-        let mut forest_ids: HashSet<u64> = HashSet::new();
-        let num_per_file = ((10000/fseeds.len()) as usize).min(1000);
-        for seed in seeds {
-            if let Ok(metrics) = db.get_metrics(seed.id) {
-                log::debug!("Looking for {} tracks similar to '{}'", num_per_file, seed.file);
-                let sim_tracks = tree.get_similars(&metrics, NonZero::new(num_per_file).unwrap());
-                for sim_track in sim_tracks {
-                    if !forest_ids.contains(&sim_track.id) {
-                        if let Ok(smetrics) = db.get_metrics(sim_track.id) {
-                            forest.values.push(smetrics);
-                            forest.ids.push(sim_track.id);
-                            forest_ids.insert(sim_track.id);
+        if fseeds.len() >= MIN_FOR_FOREST {
+            log::debug!("Using extended isolation forest algorithm");
+            let mut forest: tree::AnalysisDetails = tree::AnalysisDetails::new();
+            let mut forest_ids: HashSet<u64> = HashSet::new();
+            let num_per_file = ((10000 / fseeds.len()) as usize).min(1000);
+            for seed in seeds {
+                if let Ok(metrics) = db.get_metrics(seed.id) {
+                    log::debug!(
+                        "Looking for {} tracks similar to '{}'",
+                        num_per_file,
+                        seed.file
+                    );
+                    let sim_tracks =
+                        tree.get_similars(&metrics, NonZero::new(num_per_file).unwrap());
+                    for sim_track in sim_tracks {
+                        if !forest_ids.contains(&sim_track.id) {
+                            if let Ok(smetrics) = db.get_metrics(sim_track.id) {
+                                forest.values.push(smetrics);
+                                forest.ids.push(sim_track.id);
+                                forest_ids.insert(sim_track.id);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        log::debug!("Forest size: {}", forest.values.len());
-        for track in forest::sort_by_closest(&forest, &fseeds) {
-            if filter_out_ids.contains(&track.id) {
-                continue;
-            }
-            filter_out_ids.insert(track.id);
-            let trk: Track = get_track_from_id_with_snapshot(
-                &db,
-                track.id,
-                artist_identity_snapshot.as_deref(),
-            );
-            if let Some(reason) = discard_reason(
-                &trk,
-                min,
-                max,
-                maxbpmdiff,
-                Some((minbpm, maxbpm)),
-                None,
-                filtergenre,
-                &acceptable_genres,
-                &all_genres_from_groups,
-                filterxmas,
-                Some(&chosen_albums),
-            ) {
-                log_discard(reason, &trk);
-                continue;
-            }
-            let track_file = TrackFile {
-                file: trk.file.clone(),
-                sim: 1.0,
-            };
-            if norepart > 0
-                && artist_is_filtered(
-                    &trk.artist_identity,
-                    &filter_out_artists,
-                    artist_repeat_mode,
-                )
-            {
-                log("FILTER(artist)", &trk);
-                filtered.push(track_file);
-                continue;
-            }
-            if !trk.is_various && norepalb > 0 && filter_out_albums.contains(&trk.album) {
-                log("FILTER(album)", &trk);
-                filtered.push(track_file);
-                continue;
-            }
-            if filter_out_titles.contains(&trk.title) {
-                log("FILTER(title)", &trk);
-                filtered.push(track_file);
-                continue;
-            }
-            log("USABLE", &trk);
-            filter_out_titles.insert(trk.title.clone());
-            if norepart > 0 {
-                filter_out_artists.push(trk.artist_identity.clone());
-            }
-            if norepalb > 0 {
-                filter_out_albums.insert(trk.album.clone());
-            }
-            chosen_albums.insert(trk.album.clone());
-            chosen.push(track_file.clone());
+            log::debug!("Forest size: {}", forest.values.len());
+            for track in forest::sort_by_closest(&forest, &fseeds) {
+                if filter_out_ids.contains(&track.id) {
+                    continue;
+                }
+                filter_out_ids.insert(track.id);
+                let trk: Track = get_track_from_id_with_snapshot(
+                    &db,
+                    track.id,
+                    artist_identity_snapshot.as_deref(),
+                );
+                if let Some(reason) = discard_reason(
+                    &trk,
+                    min,
+                    max,
+                    maxbpmdiff,
+                    Some((minbpm, maxbpm)),
+                    None,
+                    filtergenre,
+                    &acceptable_genres,
+                    &all_genres_from_groups,
+                    filterxmas,
+                    Some(&chosen_albums),
+                ) {
+                    log_discard(reason, &trk);
+                    continue;
+                }
+                let track_file = TrackFile {
+                    file: trk.file.clone(),
+                    sim: 1.0,
+                };
+                if norepart > 0
+                    && artist_is_filtered(
+                        &trk.artist_identity,
+                        &filter_out_artists,
+                        artist_repeat_mode,
+                    )
+                {
+                    log("FILTER(artist)", &trk);
+                    filtered.push(track_file);
+                    continue;
+                }
+                if !trk.is_various && norepalb > 0 && filter_out_albums.contains(&trk.album) {
+                    log("FILTER(album)", &trk);
+                    filtered.push(track_file);
+                    continue;
+                }
+                if filter_out_titles.contains(&trk.title) {
+                    log("FILTER(title)", &trk);
+                    filtered.push(track_file);
+                    continue;
+                }
+                log("USABLE", &trk);
+                filter_out_titles.insert(trk.title.clone());
+                if norepart > 0 {
+                    filter_out_artists.push(trk.artist_identity.clone());
+                }
+                if norepalb > 0 {
+                    filter_out_albums.insert(trk.album.clone());
+                }
+                chosen_albums.insert(trk.album.clone());
+                chosen.push(track_file.clone());
 
-            if chosen.len()>=similarity_count {
-                break;
+                if chosen.len() >= similarity_count {
+                    break;
+                }
             }
-        }
-    } else {
-        log::debug!("Using standard algorithm");
-        useforest = 0;
+        } else {
+            log::debug!("Using standard algorithm");
+            useforest = 0;
 
-        // Map of id to its position in chosen. This is used incase a track
-        // matches multiple seeds. In which case we want the sim value to
-        // be the lowest of its matches
-        let mut id_to_pos: HashMap<u64, usize> = HashMap::new();
+            // Map of id to its position in chosen. This is used incase a track
+            // matches multiple seeds. In which case we want the sim value to
+            // be the lowest of its matches
+            let mut id_to_pos: HashMap<u64, usize> = HashMap::new();
 
-        // How many tracks per seed?
-        let mut tracks_per_seed = similarity_count;
-        if similarity_count < 15 {
-            tracks_per_seed = similarity_count * 3;
-        }
+            // How many tracks per seed?
+            let mut tracks_per_seed = similarity_count;
+            if similarity_count < 15 {
+                tracks_per_seed = similarity_count * 3;
+            }
 
-        // How many similar tracks should we get from KDTree?
-        let mut num_sim = count * seeds.len() * 50;
-        if num_sim < MIN_NUM_SIM {
-            num_sim = MIN_NUM_SIM;
-        }
+            // How many similar tracks should we get from KDTree?
+            let mut num_sim = count * seeds.len() * 50;
+            if num_sim < MIN_NUM_SIM {
+                num_sim = MIN_NUM_SIM;
+            }
 
-        for seed in seeds {
-            let mut accepted_for_seed = 0;
-            if let Ok(metrics) = db.get_metrics(seed.id) {
-                log::debug!("Looking for tracks similar to '{}'", seed.file);
-                let sim_tracks = tree.get_similars(&metrics, NonZero::new(num_sim).unwrap());
-                for sim_track in sim_tracks {
-                    if filter_out_ids.contains(&sim_track.id) {
-                        // Seen from previous seed, so set similarity to lowest value
-                        match id_to_pos.get(&sim_track.id) {
-                            Some(pos) => {
-                                if chosen[*pos].sim > sim_track.sim {
-                                    chosen[*pos].sim = sim_track.sim;
+            for seed in seeds {
+                let mut accepted_for_seed = 0;
+                if let Ok(metrics) = db.get_metrics(seed.id) {
+                    log::debug!("Looking for tracks similar to '{}'", seed.file);
+                    let sim_tracks = tree.get_similars(&metrics, NonZero::new(num_sim).unwrap());
+                    for sim_track in sim_tracks {
+                        if filter_out_ids.contains(&sim_track.id) {
+                            // Seen from previous seed, so set similarity to lowest value
+                            match id_to_pos.get(&sim_track.id) {
+                                Some(pos) => {
+                                    if chosen[*pos].sim > sim_track.sim {
+                                        chosen[*pos].sim = sim_track.sim;
+                                    }
                                 }
+                                None => {}
                             }
-                            None => {}
-                        }
-                    } else {
-                        filter_out_ids.insert(sim_track.id);
-                        let mut trk: Track = get_track_from_id_with_snapshot(
-                            &db,
-                            sim_track.id,
-                            artist_identity_snapshot.as_deref(),
-                        );
-                        trk.sim = sim_track.sim;
-                        if let Some(reason) = discard_reason(
-                            &trk,
-                            min,
-                            max,
-                            maxbpmdiff,
-                            None,
-                            Some(seed.bpm),
-                            filtergenre,
-                            &acceptable_genres,
-                            &all_genres_from_groups,
-                            filterxmas,
-                            Some(&chosen_albums),
-                        ) {
-                            log_discard(reason, &trk);
-                            continue;
-                        }
-                        let track_file = TrackFile {
-                            file: trk.file.clone(),
-                            sim: trk.sim,
-                        };
-                        if norepart > 0
-                            && artist_is_filtered(
-                                &trk.artist_identity,
-                                &filter_out_artists,
-                                artist_repeat_mode,
-                            )
-                        {
-                            log("FILTER(artist)", &trk);
+                        } else {
+                            filter_out_ids.insert(sim_track.id);
+                            let mut trk: Track = get_track_from_id_with_snapshot(
+                                &db,
+                                sim_track.id,
+                                artist_identity_snapshot.as_deref(),
+                            );
+                            trk.sim = sim_track.sim;
+                            if let Some(reason) = discard_reason(
+                                &trk,
+                                min,
+                                max,
+                                maxbpmdiff,
+                                None,
+                                Some(seed.bpm),
+                                filtergenre,
+                                &acceptable_genres,
+                                &all_genres_from_groups,
+                                filterxmas,
+                                Some(&chosen_albums),
+                            ) {
+                                log_discard(reason, &trk);
+                                continue;
+                            }
+                            let track_file = TrackFile {
+                                file: trk.file.clone(),
+                                sim: trk.sim,
+                            };
+                            if norepart > 0
+                                && artist_is_filtered(
+                                    &trk.artist_identity,
+                                    &filter_out_artists,
+                                    artist_repeat_mode,
+                                )
+                            {
+                                log("FILTER(artist)", &trk);
+
+                                if shuffle == 1 {
+                                    // We have seen this artist before. If this track is close in similarity
+                                    // to the first from this artist then store it - we will choose a random
+                                    // track later.
+                                    match matched_artists.get_mut(&trk.artist) {
+                                        Some(artist) => {
+                                            if artist.tracks.len() < MAX_ARTIST_TRACKS
+                                                && (sim_track.sim - artist.tracks[0].sim).abs()
+                                                    < MAX_ARTIST_TRACK_SIM_DIFF
+                                            {
+                                                artist.tracks.push(track_file.clone())
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+
+                                filtered.push(track_file);
+                                continue;
+                            }
+                            if !trk.is_various
+                                && norepalb > 0
+                                && filter_out_albums.contains(&trk.album)
+                            {
+                                log("FILTER(album)", &trk);
+                                filtered.push(track_file);
+                                continue;
+                            }
+                            if filter_out_titles.contains(&trk.title) {
+                                log("FILTER(title)", &trk);
+                                filtered.push(track_file);
+                                continue;
+                            }
+                            log("USABLE", &trk);
+                            filter_out_titles.insert(trk.title.clone());
+                            if norepart > 0 {
+                                filter_out_artists.push(trk.artist_identity.clone());
+                            }
+                            if norepalb > 0 {
+                                filter_out_albums.insert(trk.album.clone());
+                            }
+                            chosen_albums.insert(trk.album.clone());
+                            id_to_pos.insert(trk.id, chosen.len());
+                            chosen.push(track_file.clone());
 
                             if shuffle == 1 {
-                                // We have seen this artist before. If this track is close in similarity
-                                // to the first from this artist then store it - we will choose a random
-                                // track later.
-                                match matched_artists.get_mut(&trk.artist) {
-                                    Some(artist) => {
-                                        if artist.tracks.len() < MAX_ARTIST_TRACKS && (sim_track.sim - artist.tracks[0].sim).abs() < MAX_ARTIST_TRACK_SIM_DIFF {
-                                            artist.tracks.push(track_file.clone())
-                                        }
-                                    }
-                                    None => {}
-                                }
+                                // Store this track linked to artist. Next time we see artist we
+                                // will extend this list of tracks so that we can choose a random
+                                // one later.
+                                let mut matched_artist = MatchedArtist {
+                                    pos: chosen.len() - 1,
+                                    tracks: Vec::new(),
+                                };
+                                matched_artist.tracks.push(track_file);
+                                matched_artists.insert(trk.artist.clone(), matched_artist);
                             }
 
-                            filtered.push(track_file);
-                            continue;
-                        }
-                        if !trk.is_various && norepalb > 0 && filter_out_albums.contains(&trk.album) {
-                            log("FILTER(album)", &trk);
-                            filtered.push(track_file);
-                            continue;
-                        }
-                        if filter_out_titles.contains(&trk.title) {
-                            log("FILTER(title)", &trk);
-                            filtered.push(track_file);
-                            continue;
-                        }
-                        log("USABLE", &trk);
-                        filter_out_titles.insert(trk.title.clone());
-                        if norepart > 0 {
-                            filter_out_artists.push(trk.artist_identity.clone());
-                        }
-                        if norepalb > 0 {
-                            filter_out_albums.insert(trk.album.clone());
-                        }
-                        chosen_albums.insert(trk.album.clone());
-                        id_to_pos.insert(trk.id, chosen.len());
-                        chosen.push(track_file.clone());
-
-                        if shuffle == 1 {
-                            // Store this track linked to artist. Next time we see artist we
-                            // will extend this list of tracks so that we can choose a random
-                            // one later.
-                            let mut matched_artist = MatchedArtist {
-                                pos: chosen.len() - 1,
-                                tracks: Vec::new(),
-                            };
-                            matched_artist.tracks.push(track_file);
-                            matched_artists.insert(trk.artist.clone(), matched_artist);
-                        }
-
-                        accepted_for_seed += 1;
-                        if accepted_for_seed >= tracks_per_seed {
-                            break;
+                            accepted_for_seed += 1;
+                            if accepted_for_seed >= tracks_per_seed {
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
-    }
     } // end forest/standard fallback
 
     db.close();
 
-    log::debug!("similar_tracks: {}, filtered_tracks:{}", chosen.len(), filtered.len());
-    if useforest!=1 {
+    log::debug!(
+        "similar_tracks: {}, filtered_tracks:{}",
+        chosen.len(),
+        filtered.len()
+    );
+    if useforest != 1 {
         let mut min_count: usize = 2;
         if min_count > count {
             min_count = count;
         }
 
-        if shuffle == 1  {
+        if shuffle == 1 {
             // For each artist that had multiple similar tracks, choose one at random
             for (name, info) in matched_artists {
                 if info.tracks.len() > 1 {
-                    log::debug!("Choosing random track for {} ({} tracks)", name, info.tracks.len());
+                    log::debug!(
+                        "Choosing random track for {} ({} tracks)",
+                        name,
+                        info.tracks.len()
+                    );
                     match info.tracks.choose(&mut thread_rng()) {
                         Some(trk) => {
                             chosen[info.pos].file = trk.file.clone();
@@ -1152,9 +1224,7 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
             let mut sim_tracks: Vec<tree::Sim> = Vec::new();
 
             if useadaptiveweights == 1 {
-                let learned_matrix = req
-                    .app_data::<web::Data<Option<Array2<f32>>>>()
-                    .unwrap();
+                let learned_matrix = req.app_data::<web::Data<Option<Array2<f32>>>>().unwrap();
                 if let Ok(raw_seed) = db.get_raw_metrics(seed.id) {
                     let selection = crate::adaptive::select_matrix(
                         &[raw_seed],
@@ -1187,10 +1257,12 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
                 if byartist == 1 {
                     let vals = db.load_artist_tree(&seed.orig_artist);
                     let tree = tree::Tree::new(&vals);
-                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                    sim_tracks
+                        .extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
                 } else {
                     let tree = req.app_data::<web::Data<tree::Tree>>().unwrap();
-                    sim_tracks.extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
+                    sim_tracks
+                        .extend(tree.get_similars(&metrics, NonZero::new(MIN_NUM_SIM).unwrap()));
                 }
             }
 
@@ -1263,20 +1335,18 @@ pub async fn list(req: HttpRequest, payload: web::Json<ListParams>) -> impl Resp
 /// returned `valid` flag is false.
 pub async fn guidance_score(payload: web::Json<GuidanceHostRequestV1>) -> HttpResponse {
     let request = payload.into_inner();
-    let response: GuidanceHostResponseV1 = match web::block(move || {
-        Ok::<_, std::io::Error>(guidance::score(request))
-    })
-    .await {
-        Ok(response) => response,
-        Err(error) => GuidanceHostResponseV1 {
-            response_version: "guidance_host_response_v1".into(),
-            valid: false,
-            signals: vec![],
-            diagnostics: bliss_playlist_guidance_spi::Diagnostics::default(),
-            selection_trace: None,
-            diagnostic: format!("native guidance task failed: {error}"),
-        },
-    };
+    let response: GuidanceHostResponseV1 =
+        match web::block(move || Ok::<_, std::io::Error>(guidance::score(request))).await {
+            Ok(response) => response,
+            Err(error) => GuidanceHostResponseV1 {
+                response_version: "guidance_host_response_v1".into(),
+                valid: false,
+                signals: vec![],
+                diagnostics: bliss_playlist_guidance_spi::Diagnostics::default(),
+                selection_trace: None,
+                diagnostic: format!("native guidance task failed: {error}"),
+            },
+        };
     HttpResponse::Ok().json(response)
 }
 
@@ -1298,6 +1368,10 @@ fn adaptive_list_similarities(
     similarities.sort_by(|left, right| left.sim.total_cmp(&right.sim));
     similarities.truncate(MIN_NUM_SIM);
     similarities
+}
+
+pub async fn guidance_capabilities() -> impl Responder {
+    web::Json(guidance::capabilities())
 }
 
 pub async fn ready() -> impl Responder {

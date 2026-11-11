@@ -5,14 +5,13 @@
  * GPLv3 license.
  *
  **/
-
 use actix_web::{client, middleware::Logger, web, App, HttpServer};
 use argparse::{ArgumentParser, Store, StoreTrue};
 use ndarray::Array2;
+use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process;
-use rayon::ThreadPoolBuilder;
 mod adaptive;
 mod api;
 mod db;
@@ -58,7 +57,11 @@ async fn send_port_to_lms(lms_server: &String, port: u16) {
             ]
         });
 
-        match client.post(format!("http://{}/jsonrpc.js", lms_server)).send_json(&request).await {
+        match client
+            .post(format!("http://{}/jsonrpc.js", lms_server))
+            .send_json(&request)
+            .await
+        {
             Ok(_) => {
                 log::debug!("LMS updated");
             }
@@ -85,25 +88,56 @@ async fn main() -> std::io::Result<()> {
         let port_help = format!("Port number (default: {})", port);
         let address_help = format!("Address to use (default: {})", address);
         let description = format!("Bliss Mixer v{}", VERSION);
-        let weights_help = format!("Comma separated weight factors ({} values)", tree::DIMENSIONS);
+        let weights_help = format!(
+            "Comma separated weight factors ({} values)",
+            tree::DIMENSIONS
+        );
 
         // arg_parse.refer 'borrows' db_path, etc, and can only have one
         // borrow per scope, hence this section is enclosed in { }
         let mut arg_parse = ArgumentParser::new();
         arg_parse.set_description(&description);
-        arg_parse.refer(&mut db_path).add_option(&["-d", "--db"], Store, &db_path_help);
-        arg_parse.refer(&mut port).add_option(&["-p", "--port"], Store, &port_help);
-        arg_parse.refer(&mut address).add_option(&["-a", "--address"], Store, &address_help);
-        arg_parse.refer(&mut logging).add_option(&["-l", "--logging"], Store, "Log level (trace, debug, info, warn, error)");
-        arg_parse.refer(&mut lms_server).add_option(&["-L", "--lms"], Store, "LMS server (hostname:port, or IP address:port)");
-        arg_parse.refer(&mut allow_db_upload).add_option(&["-u", "--upload"], StoreTrue, "Allow uploading of database");
-        arg_parse.refer(&mut weights).add_option(&["-w", "--weights"], Store, &weights_help);
-        arg_parse.refer(&mut matrix_path).add_option(&["-m", "--matrix"], Store, "Path to learned Mahalanobis matrix JSON file");
+        arg_parse
+            .refer(&mut db_path)
+            .add_option(&["-d", "--db"], Store, &db_path_help);
+        arg_parse
+            .refer(&mut port)
+            .add_option(&["-p", "--port"], Store, &port_help);
+        arg_parse
+            .refer(&mut address)
+            .add_option(&["-a", "--address"], Store, &address_help);
+        arg_parse.refer(&mut logging).add_option(
+            &["-l", "--logging"],
+            Store,
+            "Log level (trace, debug, info, warn, error)",
+        );
+        arg_parse.refer(&mut lms_server).add_option(
+            &["-L", "--lms"],
+            Store,
+            "LMS server (hostname:port, or IP address:port)",
+        );
+        arg_parse.refer(&mut allow_db_upload).add_option(
+            &["-u", "--upload"],
+            StoreTrue,
+            "Allow uploading of database",
+        );
+        arg_parse
+            .refer(&mut weights)
+            .add_option(&["-w", "--weights"], Store, &weights_help);
+        arg_parse.refer(&mut matrix_path).add_option(
+            &["-m", "--matrix"],
+            Store,
+            "Path to learned Mahalanobis matrix JSON file",
+        );
         arg_parse.parse_args_or_exit();
     }
 
-    if logging.eq_ignore_ascii_case("trace") || logging.eq_ignore_ascii_case("debug") || logging.eq_ignore_ascii_case("info")
-        || logging.eq_ignore_ascii_case("warn") || logging.eq_ignore_ascii_case("error") {
+    if logging.eq_ignore_ascii_case("trace")
+        || logging.eq_ignore_ascii_case("debug")
+        || logging.eq_ignore_ascii_case("info")
+        || logging.eq_ignore_ascii_case("warn")
+        || logging.eq_ignore_ascii_case("error")
+    {
         env_logger::init_from_env(env_logger::Env::default().filter_or("XXXXXXXX", logging));
     } else {
         env_logger::init_from_env(env_logger::Env::default().filter_or("XXXXXXXX", "ERROR"));
@@ -141,7 +175,8 @@ async fn main() -> std::io::Result<()> {
                 .data(db_path.clone())
                 .app_data(web::PayloadConfig::new(200 * 1024 * 1024))
                 .route("/upload", web::put().to(upload::handle_upload))
-        }).bind((address, port))?;
+        })
+        .bind((address, port))?;
         send_port_to_lms(&lms_server, server.addrs()[0].port()).await;
 
         server.run().await
@@ -163,9 +198,12 @@ async fn main() -> std::io::Result<()> {
         }
         let tree = tree::Tree::new(&tree_details);
 
-        let total_cpus:usize = num_cpus::get() as usize;
-        if total_cpus>1 {
-            ThreadPoolBuilder::new().num_threads(total_cpus - 1).build_global().unwrap();
+        let total_cpus: usize = num_cpus::get() as usize;
+        if total_cpus > 1 {
+            ThreadPoolBuilder::new()
+                .num_threads(total_cpus - 1)
+                .build_global()
+                .unwrap();
         }
 
         let server = HttpServer::new(move || {
@@ -177,9 +215,14 @@ async fn main() -> std::io::Result<()> {
                 .data(learned_matrix.clone())
                 .route("/api/mix", web::post().to(api::mix))
                 .route("/api/guidance/score", web::post().to(api::guidance_score))
+                .route(
+                    "/api/guidance/capabilities",
+                    web::get().to(api::guidance_capabilities),
+                )
                 .route("/api/list", web::post().to(api::list))
                 .route("/api/ready", web::get().to(api::ready))
-        }).bind((address, port))?;
+        })
+        .bind((address, port))?;
         send_port_to_lms(&lms_server, server.addrs()[0].port()).await;
 
         server.run().await
