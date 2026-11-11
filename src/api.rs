@@ -185,6 +185,21 @@ fn candidate_ids_from_snapshot(db: &db::Db, snapshot: &str) -> Result<HashSet<u6
     Ok(ids)
 }
 
+fn library_similars(tree: &tree::Tree, metrics: &[f32; tree::DIMENSIONS], wanted: usize, allowed: Option<&HashSet<u64>>, total: usize) -> Vec<tree::Sim> {
+    let Some(allowed) = allowed else {
+        return tree.get_similars(metrics, NonZero::new(wanted.max(1)).unwrap());
+    };
+    let target = wanted.min(allowed.len());
+    if target == 0 || total == 0 { return Vec::new(); }
+    let mut search = wanted.max(1).min(total);
+    loop {
+        let result: Vec<_> = tree.get_similars(metrics, NonZero::new(search).unwrap())
+            .into_iter().filter(|track| allowed.contains(&track.id)).take(target).collect();
+        if result.len() >= target || search >= total { return result; }
+        search = search.saturating_mul(2).min(total);
+    }
+}
+
 fn get_track_from_id(db: &db::Db, id: u64) -> Track {
     let mut info = Track {
         found: false,
@@ -519,6 +534,9 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
         },
         None => None,
     };
+    let candidate_search_total: usize = if candidate_ids.is_some() {
+        db.conn.query_row("SELECT COUNT(*) FROM TracksV2 WHERE Ignore IS NOT 1", [], |row| row.get(0)).unwrap_or(0)
+    } else { 0 };
     let mut count = payload.count.unwrap_or(5) as usize;
     let filtergenre = payload.filtergenre.unwrap_or(0);
     let mut filterxmas = payload.filterxmas.unwrap_or(0);
@@ -902,18 +920,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             log::debug!("Using extended isolation forest algorithm");
             let mut forest: tree::AnalysisDetails = tree::AnalysisDetails::new();
             let mut forest_ids: HashSet<u64> = HashSet::new();
-            let num_per_file = if candidate_ids.is_some() {
-                db.conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM TracksV2 WHERE Ignore IS NOT 1",
-                        [],
-                        |row| row.get::<_, usize>(0),
-                    )
-                    .unwrap_or(0)
-                    .max(1)
-            } else {
-                ((10000 / fseeds.len()) as usize).min(1000)
-            };
+            let num_per_file = ((10000 / fseeds.len()) as usize).min(1000);
             for seed in seeds {
                 if let Ok(metrics) = db.get_metrics(seed.id) {
                     log::debug!(
@@ -921,8 +928,7 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                         num_per_file,
                         seed.file
                     );
-                    let sim_tracks =
-                        tree.get_similars(&metrics, NonZero::new(num_per_file).unwrap());
+                    let sim_tracks = library_similars(tree, &metrics, num_per_file, candidate_ids.as_ref(), candidate_search_total);
                     for sim_track in sim_tracks {
                         if !forest_ids.contains(&sim_track.id)
                             && candidate_ids
@@ -1026,23 +1032,12 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             if num_sim < MIN_NUM_SIM {
                 num_sim = MIN_NUM_SIM;
             }
-            if candidate_ids.is_some() {
-                num_sim = db
-                    .conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM TracksV2 WHERE Ignore IS NOT 1",
-                        [],
-                        |row| row.get::<_, usize>(0),
-                    )
-                    .unwrap_or(0)
-                    .max(1);
-            }
 
             for seed in seeds {
                 let mut accepted_for_seed = 0;
                 if let Ok(metrics) = db.get_metrics(seed.id) {
                     log::debug!("Looking for tracks similar to '{}'", seed.file);
-                    let sim_tracks = tree.get_similars(&metrics, NonZero::new(num_sim).unwrap());
+                    let sim_tracks = library_similars(tree, &metrics, num_sim, candidate_ids.as_ref(), candidate_search_total);
                     for sim_track in sim_tracks {
                         if candidate_ids
                             .as_ref()
