@@ -102,6 +102,7 @@ pub struct MixParams {
     debug: Option<u16>,
     json: Option<u16>,
     artist_identity_snapshot: Option<String>,
+    candidate_library_snapshot: Option<String>,
     artist_repeat_mode: Option<ArtistRepeatMode>,
 }
 
@@ -160,6 +161,28 @@ struct TrackFile {
 struct MatchedArtist {
     pos: usize,
     tracks: Vec<TrackFile>,
+}
+
+fn candidate_ids_from_snapshot(db: &db::Db, snapshot: &str) -> Result<HashSet<u64>, String> {
+    let file = std::fs::File::open(snapshot).map_err(|e| e.to_string())?;
+    let files: HashSet<String> = serde_json::from_reader(file).map_err(|e| format!("{e}"))?;
+    let mut statement = db
+        .conn
+        .prepare("SELECT rowid, File FROM TracksV2 WHERE Ignore IS NOT 1")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        let (id, file) = row.map_err(|e| e.to_string())?;
+        if files.contains(&file) {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
 }
 
 fn get_track_from_id(db: &db::Db, id: u64) -> Track {
@@ -486,6 +509,16 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     let all_db_genres = req.app_data::<web::Data<HashSet<String>>>().unwrap();
     let db_path = req.app_data::<web::Data<String>>().unwrap();
     let db = db::Db::new(db_path);
+    let candidate_ids = match payload.candidate_library_snapshot.as_deref() {
+        Some(path) => match candidate_ids_from_snapshot(&db, path) {
+            Ok(ids) => Some(ids),
+            Err(error) => {
+                return HttpResponse::BadRequest()
+                    .body(format!("Cannot read candidate library snapshot: {error}"))
+            }
+        },
+        None => None,
+    };
     let mut count = payload.count.unwrap_or(5) as usize;
     let filtergenre = payload.filtergenre.unwrap_or(0);
     let mut filterxmas = payload.filterxmas.unwrap_or(0);
@@ -688,7 +721,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             let mut scored: Vec<(u64, f32)> = all_raw
                 .par_iter()
                 .filter_map(|(id, raw)| {
-                    if filter_out_ids.contains(id) {
+                    if filter_out_ids.contains(id)
+                        || candidate_ids
+                            .as_ref()
+                            .map_or(false, |ids| !ids.contains(id))
+                    {
                         None
                     } else {
                         let raw_arr = Array1::from_vec(raw.to_vec());
@@ -865,7 +902,18 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             log::debug!("Using extended isolation forest algorithm");
             let mut forest: tree::AnalysisDetails = tree::AnalysisDetails::new();
             let mut forest_ids: HashSet<u64> = HashSet::new();
-            let num_per_file = ((10000 / fseeds.len()) as usize).min(1000);
+            let num_per_file = if candidate_ids.is_some() {
+                db.conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM TracksV2 WHERE Ignore IS NOT 1",
+                        [],
+                        |row| row.get::<_, usize>(0),
+                    )
+                    .unwrap_or(0)
+                    .max(1)
+            } else {
+                ((10000 / fseeds.len()) as usize).min(1000)
+            };
             for seed in seeds {
                 if let Ok(metrics) = db.get_metrics(seed.id) {
                     log::debug!(
@@ -876,7 +924,11 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     let sim_tracks =
                         tree.get_similars(&metrics, NonZero::new(num_per_file).unwrap());
                     for sim_track in sim_tracks {
-                        if !forest_ids.contains(&sim_track.id) {
+                        if !forest_ids.contains(&sim_track.id)
+                            && candidate_ids
+                                .as_ref()
+                                .map_or(true, |ids| ids.contains(&sim_track.id))
+                        {
                             if let Ok(smetrics) = db.get_metrics(sim_track.id) {
                                 forest.values.push(smetrics);
                                 forest.ids.push(sim_track.id);
@@ -974,6 +1026,17 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
             if num_sim < MIN_NUM_SIM {
                 num_sim = MIN_NUM_SIM;
             }
+            if candidate_ids.is_some() {
+                num_sim = db
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM TracksV2 WHERE Ignore IS NOT 1",
+                        [],
+                        |row| row.get::<_, usize>(0),
+                    )
+                    .unwrap_or(0)
+                    .max(1);
+            }
 
             for seed in seeds {
                 let mut accepted_for_seed = 0;
@@ -981,6 +1044,12 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
                     log::debug!("Looking for tracks similar to '{}'", seed.file);
                     let sim_tracks = tree.get_similars(&metrics, NonZero::new(num_sim).unwrap());
                     for sim_track in sim_tracks {
+                        if candidate_ids
+                            .as_ref()
+                            .map_or(false, |ids| !ids.contains(&sim_track.id))
+                        {
+                            continue;
+                        }
                         if filter_out_ids.contains(&sim_track.id) {
                             // Seen from previous seed, so set similarity to lowest value
                             match id_to_pos.get(&sim_track.id) {
@@ -1151,6 +1220,9 @@ pub async fn mix(req: HttpRequest, payload: web::Json<MixParams>) -> HttpRespons
     chosen.truncate(count);
 
     let mut http_resp = HttpResponse::Ok();
+    if candidate_ids.is_some() {
+        http_resp.set_header("X-Bliss-Candidate-Library", "enforced");
+    }
     if let Some(di) = debug_info {
         if let Ok(json) = serde_json::to_string(&di) {
             log::debug!("Adaptive weights debug: {}", json);
@@ -1381,6 +1453,106 @@ pub async fn ready() -> impl Responder {
 #[cfg(test)]
 mod list_tests {
     use super::*;
+
+    #[test]
+    fn mix_keeps_new_candidates_within_snapshot_in_all_search_modes() {
+        actix_web::rt::System::new("library-test").block_on(async {
+        use actix_web::test;
+        let base = std::env::temp_dir().join(format!("bliss-mix-library-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("tracks.sqlite");
+        let snapshot = base.join("members.json");
+        let database = db::Db::new(&db_path.to_string_lossy().into_owned());
+        let mut columns = vec!["Tempo", "Zcr", "MeanSpectralCentroid", "StdDevSpectralCentroid", "MeanSpectralRolloff", "StdDevSpectralRolloff", "MeanSpectralFlatness", "StdDevSpectralFlatness", "MeanLoudness", "StdDevLoudness"];
+        let chroma: Vec<String> = (1..=13).map(|i| format!("Chroma{i}")).collect();
+        columns.extend(chroma.iter().map(String::as_str));
+        let metrics = columns.iter().map(|name| format!("{name} REAL")).collect::<Vec<_>>().join(", ");
+        database.conn.execute_batch(&format!("CREATE TABLE TracksV2 (File TEXT, Title TEXT, Artist TEXT, AlbumArtist TEXT, Album TEXT, Genre TEXT, Duration INTEGER, {metrics}, Ignore INTEGER);" )).unwrap();
+        for (i, name) in ["seed1", "seed2", "seed3", "seed4", "inside", "outside"].iter().enumerate() {
+            let values = (0..23).map(|j| format!("{}", ((i + j) as f32) / 100.0)).collect::<Vec<_>>().join(",");
+            database.conn.execute_batch(&format!("INSERT INTO TracksV2 VALUES ('{name}.flac', '{name}', '{name}', '{name}', '{name}', 'rock', 180, {values}, 0);" )).unwrap();
+        }
+        std::fs::write(&snapshot, "[\"inside.flac\"]").unwrap();
+        let details = database.load();
+        let mixer_tree = tree::Tree::new(&details);
+        database.close();
+        for (forest, adaptive) in [(0, 0), (0, 1), (1, 0)] {
+            let payload = serde_json::json!({"tracks": ["seed1.flac", "seed2.flac", "seed3.flac", "seed4.flac"], "genregroups": [], "count": 2, "forest": forest, "adaptiveweights": adaptive, "candidate_library_snapshot": snapshot.to_str().unwrap()});
+            let req = test::TestRequest::default()
+                .app_data(web::Data::new(mixer_tree.clone()))
+                .app_data(web::Data::new(HashSet::<String>::new()))
+                .app_data(web::Data::new(db_path.to_string_lossy().into_owned()))
+                .app_data(web::Data::new(None::<Array2<f32>>))
+                .to_http_request();
+            let mut response = mix(req, web::Json(serde_json::from_value(payload).unwrap())).await;
+            assert_eq!(response.headers().get("X-Bliss-Candidate-Library").unwrap(), "enforced");
+            let body = match response.take_body() {
+                actix_web::body::ResponseBody::Body(actix_web::body::Body::Bytes(bytes))
+                | actix_web::body::ResponseBody::Other(actix_web::body::Body::Bytes(bytes)) => bytes,
+                _ => panic!("expected a byte response body"),
+            };
+            assert_eq!(std::str::from_utf8(&body).unwrap(), "inside.flac\n", "forest={forest}, adaptive={adaptive}");
+        }
+        std::fs::write(&snapshot, "[]").unwrap();
+        for (forest, adaptive) in [(0, 0), (0, 1), (1, 0)] {
+            let payload = serde_json::json!({"tracks": ["seed1.flac", "seed2.flac", "seed3.flac", "seed4.flac"], "genregroups": [], "count": 2, "forest": forest, "adaptiveweights": adaptive, "candidate_library_snapshot": snapshot.to_str().unwrap()});
+            let req = test::TestRequest::default()
+                .app_data(web::Data::new(mixer_tree.clone()))
+                .app_data(web::Data::new(HashSet::<String>::new()))
+                .app_data(web::Data::new(db_path.to_string_lossy().into_owned()))
+                .app_data(web::Data::new(None::<Array2<f32>>))
+                .to_http_request();
+            let mut response = mix(req, web::Json(serde_json::from_value(payload).unwrap())).await;
+            assert_eq!(response.headers().get("X-Bliss-Candidate-Library").unwrap(), "enforced");
+            match response.take_body() {
+                actix_web::body::ResponseBody::Body(actix_web::body::Body::Bytes(bytes))
+                | actix_web::body::ResponseBody::Other(actix_web::body::Body::Bytes(bytes)) => assert!(bytes.is_empty()),
+                actix_web::body::ResponseBody::Body(actix_web::body::Body::Empty)
+                | actix_web::body::ResponseBody::Other(actix_web::body::Body::Empty) => (),
+                _ => panic!("expected an empty response body"),
+            }
+        }
+        std::fs::remove_file(snapshot).unwrap();
+        std::fs::remove_file(db_path).unwrap();
+        std::fs::remove_dir(base).unwrap();
+        });
+    }
+
+    #[test]
+    fn candidate_snapshot_limits_rows_and_rejects_invalid_input() {
+        let suffix = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+        let base = std::env::temp_dir().join(format!("bliss-library-{suffix}"));
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("bliss.sqlite");
+        let snapshot = base.join("members.json");
+        let database = db::Db::new(&db_path.to_string_lossy().into_owned());
+        database.conn.execute_batch("CREATE TABLE TracksV2 (File TEXT, Ignore INTEGER); INSERT INTO TracksV2 VALUES ('inside.flac', 0), ('outside.flac', 0), ('ignored.flac', 1);").unwrap();
+        std::fs::write(&snapshot, "[\"inside.flac\",\"ignored.flac\"]").unwrap();
+        let ids = candidate_ids_from_snapshot(&database, snapshot.to_str().unwrap()).unwrap();
+        assert_eq!(ids, [1u64].iter().copied().collect());
+        std::fs::write(&snapshot, "[]").unwrap();
+        assert!(
+            candidate_ids_from_snapshot(&database, snapshot.to_str().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(&snapshot, "invalid json").unwrap();
+        assert!(candidate_ids_from_snapshot(&database, snapshot.to_str().unwrap()).is_err());
+        database.close();
+        std::fs::remove_file(snapshot).unwrap();
+        std::fs::remove_file(db_path).unwrap();
+        std::fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn mix_rejects_non_string_candidate_library_snapshot() {
+        let payload = serde_json::json!({
+            "tracks": ["seed.flac"],
+            "genregroups": [],
+            "candidate_library_snapshot": 42
+        });
+        assert!(serde_json::from_value::<MixParams>(payload).is_err());
+    }
 
     #[test]
     fn list_payload_accepts_adaptive_metric_controls() {
